@@ -106,6 +106,10 @@ int get_task_userstop(task_t);
 extern thread_t	port_name_to_thread(mach_port_name_t port_name);
 extern thread_t get_firstthread(task_t);
 
+/* mercurysquad: declare sysctl variable which controls whether PT_DENY_ATTACH is enabled */
+int ptda_enabled = 1;
+SYSCTL_INT(_debug, OID_AUTO, ptracedeny_enabled, CTLFLAG_RW | CTLFLAG_ANYBODY,
+                       &ptda_enabled, 1, "Allow applications to request PT_DENY_ATTACH");
 
 /*
  * sys-trace system call.
@@ -127,7 +131,8 @@ ptrace(struct proc *p, struct ptrace_args *uap, int32_t *retval)
 	AUDIT_ARG(addr, uap->addr);
 	AUDIT_ARG(value32, uap->data);
 
-	if (uap->req == PT_DENY_ATTACH) {
+	/* mercurysquad: only do this when PT_DENY_ATTACH is enabled */
+   	if ((uap->req == PT_DENY_ATTACH) && ptda_enabled) {
 		proc_lock(p);
 		if (ISSET(p->p_lflag, P_LTRACED)) {
 			proc_unlock(p);

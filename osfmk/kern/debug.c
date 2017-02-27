@@ -245,7 +245,7 @@ debug_log_init(void)
 #endif
 }
 
-#if defined(__i386__) || defined(__x86_64__)
+/*#if defined(__i386__) || defined(__x86_64__)
 #define panic_stop()	pmCPUHalt(PM_HALT_PANIC)
 #define panic_safe()	pmSafeMode(x86_lcpu(), PM_SAFE_FL_SAFE)
 #define panic_normal()	pmSafeMode(x86_lcpu(), PM_SAFE_FL_NORMAL)
@@ -253,7 +253,11 @@ debug_log_init(void)
 #define panic_stop()	{ while (1) ; }
 #define panic_safe()
 #define panic_normal()
-#endif
+#endif*/
+/* AnV - Don't reboot on panic */
+#define panic_stop()	{ while (1) ; }
+#define panic_safe()
+#define panic_normal()
 
 /*
  * Prevent CPP from breaking the definition below,

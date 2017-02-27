@@ -11,5 +11,8 @@ iokit/Kernel/x86_64/IOAsmSupport.s                            standard
 # Power Domains
 iokit/Kernel/IOPMrootDomain.cpp    			    optional iokitcpp
 
+# Real Time Clock hack
+iokit/Drivers/platform/drvAppleIntelClock/IntelClock.cpp    optional iokitcpp
+
 # Key Store helper
 iokit/Kernel/i386/IOKeyStoreHelper.cpp			    standard

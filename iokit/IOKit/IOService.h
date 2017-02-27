@@ -1397,6 +1397,7 @@ private:
     static void actionStop( IOService * client, IOService * provider,
                             void *, void *, void *);
 
+public:
     APPLE_KEXT_COMPATIBILITY_VIRTUAL
         IOReturn resolveInterrupt(IOService *nub, int source);
     APPLE_KEXT_COMPATIBILITY_VIRTUAL
@@ -1407,7 +1408,6 @@ private:
 #endif
 
     /* power management */
-public:
 
 /*! @function PMinit
     @abstract Initializes power management for a driver.

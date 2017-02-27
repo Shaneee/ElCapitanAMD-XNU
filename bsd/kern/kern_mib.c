@@ -484,6 +484,16 @@ sysctl_mib_init(void)
 #error Unsupported arch
 #endif
 
+    static i386_cpu_info_t	cpuid_cpu_info;
+    i386_cpu_info_t		*info_p = &cpuid_cpu_info;
+
+    uint32_t reg[4];
+    do_cpuid(0, reg);
+	bcopy((char *)&reg[ebx], &info_p->cpuid_vendor[0], 4); /* ug */
+	bcopy((char *)&reg[ecx], &info_p->cpuid_vendor[8], 4);
+	bcopy((char *)&reg[edx], &info_p->cpuid_vendor[4], 4);
+	info_p->cpuid_vendor[12] = 0;
+
 	/*
 	 * Populate the optional portion of the hw.* MIB.
 	 *
@@ -502,16 +512,16 @@ sysctl_mib_init(void)
 
 	/* hw.cacheconfig */
 	cacheconfig[0] = ml_cpu_cache_sharing(0);
-	cacheconfig[1] = ml_cpu_cache_sharing(1);
-	cacheconfig[2] = ml_cpu_cache_sharing(2);
-	cacheconfig[3] = ml_cpu_cache_sharing(3);
+	cacheconfig[1] = cpuid_info()->cache_sharing[L1D];
+	cacheconfig[2] = cpuid_info()->cache_sharing[L2U];
+	cacheconfig[3] = cpuid_info()->cache_sharing[L3U];
 	cacheconfig[4] = 0;
 
 	/* hw.cachesize */
 	cachesize[0] = ml_cpu_cache_size(0);
-	cachesize[1] = ml_cpu_cache_size(1);
-	cachesize[2] = ml_cpu_cache_size(2);
-	cachesize[3] = ml_cpu_cache_size(3);
+	cachesize[1] = cpuid_info()->cache_size[L1D];
+	cachesize[2] = cpuid_info()->cache_size[L2U];
+	cachesize[3] = cpuid_info()->cache_size[L3U];
 	cachesize[4] = 0;
 
 	/* hw.packages */

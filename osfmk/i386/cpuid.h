@@ -173,18 +173,15 @@
  * indicate the bitmask of features that must be present before the system
  * is eligible to run the "x86_64h" "Haswell feature subset" slice.
  */
-#define CPUID_X86_64_H_FEATURE_SUBSET ( CPUID_FEATURE_FMA    | \
-                                        CPUID_FEATURE_SSE4_2 | \
+#define CPUID_X86_64_H_FEATURE_SUBSET ( CPUID_FEATURE_SSE4_2 | \
                                         CPUID_FEATURE_MOVBE  | \
                                         CPUID_FEATURE_POPCNT | \
-                                        CPUID_FEATURE_AVX1_0   \
                                       )
 
 #define CPUID_X86_64_H_EXTFEATURE_SUBSET ( CPUID_EXTFEATURE_LZCNT \
                                          )
 
 #define CPUID_X86_64_H_LEAF7_FEATURE_SUBSET ( CPUID_LEAF7_FEATURE_BMI1 | \
-                                              CPUID_LEAF7_FEATURE_AVX2 | \
                                               CPUID_LEAF7_FEATURE_BMI2   \
                                             )
 
@@ -447,11 +444,26 @@ extern i386_vmm_info_t	*cpuid_vmm_info(void);
 extern uint32_t		cpuid_vmm_family(void);
 #endif
 
+extern void     FixAMDTLB(void);
+extern boolean_t	IsAmdCPU(void);
+extern boolean_t	IsIntelCPU(void);
+extern uint32_t extractBitField(uint32_t inField, uint32_t width, uint32_t offset);
+extern uint32_t getBitFieldWidth(uint32_t number);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* ASSEMBLER */
+
+#define CPU_FAMILY_PENTIUM_M	(0x6)
+#define CPU_FAMILY_PENTIUM_4	(0xF)
+#define CPU_FAMILY_PENTIUM_4_M2 (0xF)
+#define CPU_FAMILY_AMD_PHENOM	(0x10)
+#define CPU_FAMILY_AMD_SHANGHAI	(0x11)
+#define CPU_FAMILY_I5		(0x1E)
+#define CPU_FAMILY_I9		(0x2C)
+#define CPU_FAMILY_SANDY	(0x2A)
 
 #endif /* __APPLE_API_PRIVATE */
 #endif /* _MACHINE_CPUID_H_ */

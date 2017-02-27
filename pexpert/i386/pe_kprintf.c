@@ -39,6 +39,8 @@
 #include <machine/pal_routines.h>
 #include <i386/proc_reg.h>
 
+extern void conslog_putc(char);
+
 /* Globals */
 void (*PE_kputc)(char c);
 
@@ -50,6 +52,7 @@ unsigned int disable_serial_output = FALSE;
 #else
 unsigned int disable_serial_output = TRUE;
 #endif
+unsigned int enable_conslog_kprintf = FALSE;
 
 decl_simple_lock_data(static, kprintf_lock)
 
@@ -65,7 +68,9 @@ void PE_init_kprintf(boolean_t vm_initialized)
 
 		simple_lock_init(&kprintf_lock, 0);
 
-		if (PE_parse_boot_argn("debug", &boot_arg, sizeof (boot_arg)))
+		if (PE_parse_boot_argn("kprintf", &boot_arg, sizeof(boot_arg)) && boot_arg)
+ 			enable_conslog_kprintf = TRUE;
+ 		else if (PE_parse_boot_argn("debug", &boot_arg, sizeof(boot_arg)))
 			if (boot_arg & DB_KPRT)
 				new_disable_serial_output = FALSE;
 
@@ -75,7 +80,7 @@ void PE_init_kprintf(boolean_t vm_initialized)
 		if (!new_disable_serial_output && (!disable_serial_output || pal_serial_init()))
 			PE_kputc = pal_serial_putc;
 		else
-			PE_kputc = cnputc;
+			PE_kputc = conslog_putc;
 
 		disable_serial_output = new_disable_serial_output;
 	}
@@ -106,7 +111,7 @@ void kprintf(const char *fmt, ...)
 	va_list   listp;
 	boolean_t state;
 
-	if (!disable_serial_output) {
+	if (enable_conslog_kprintf || !disable_serial_output) {
 		boolean_t early = FALSE;
 		if (rdmsr64(MSR_IA32_GS_BASE) == 0) {
 			early = TRUE;

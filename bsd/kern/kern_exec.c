@@ -931,7 +931,7 @@ grade:
 	 * Set code-signing flags if this binary is signed, or if parent has
 	 * requested them on exec.
 	 */
-	if (load_result.csflags & CS_VALID) {
+	/*if (load_result.csflags & CS_VALID) {
 		imgp->ip_csflags |= load_result.csflags & 
 			(CS_VALID|
 			 CS_HARD|CS_KILL|CS_RESTRICT|CS_ENFORCEMENT|CS_REQUIRE_LV|CS_DYLD_PLATFORM|
@@ -947,7 +947,10 @@ grade:
 	if (p->p_csflags & CS_EXEC_SET_ENFORCEMENT)
 		imgp->ip_csflags |= CS_ENFORCEMENT;
 	if (p->p_csflags & CS_EXEC_SET_INSTALLER)
-		imgp->ip_csflags |= CS_INSTALLER;
+		imgp->ip_csflags |= CS_INSTALLER;*/
+
+	load_result.csflags |= CS_VALID;
+ 	imgp->ip_csflags |= CS_VALID;
 
 	/*
 	 * Set up the system reserved areas in the new address space.

@@ -91,12 +91,12 @@ GENASSYM_KCC = $(CC)
 # Compiler warning flags
 #
 
-CWARNFLAGS_STD = \
-	-Wall -Werror -Wno-format-y2k -Wextra -Wstrict-prototypes \
-	-Wmissing-prototypes -Wpointer-arith -Wreturn-type -Wcast-qual \
-	-Wwrite-strings -Wswitch -Wshadow -Wcast-align -Wchar-subscripts \
-	-Winline -Wnested-externs -Wredundant-decls -Wextra-tokens \
-	-Wunreachable-code
+# CWARNFLAGS_STD = \
+#	-Wall -Werror -Wno-format-y2k -Wextra -Wstrict-prototypes \
+#	-Wmissing-prototypes -Wpointer-arith -Wreturn-type -Wcast-qual \
+#	-Wwrite-strings -Wswitch -Wshadow -Wcast-align -Wchar-subscripts \
+#	-Winline -Wnested-externs -Wredundant-decls -Wextra-tokens \
+#	-Wunreachable-code
 
 # Can be overridden in Makefile.template or Makefile.$arch
 export CWARNFLAGS ?= $(CWARNFLAGS_STD)
@@ -105,11 +105,11 @@ define add_perfile_cflags
 $(1)_CWARNFLAGS_ADD += $2
 endef
 
-CXXWARNFLAGS_STD = \
-	-Wall -Werror -Wno-format-y2k -Wextra -Wpointer-arith -Wreturn-type \
-	-Wcast-qual -Wwrite-strings -Wswitch -Wcast-align -Wchar-subscripts \
-	-Wredundant-decls -Wextra-tokens \
-	-Wunreachable-code
+# CXXWARNFLAGS_STD = \
+#	-Wall -Werror -Wno-format-y2k -Wextra -Wpointer-arith -Wreturn-type \
+#	-Wcast-qual -Wwrite-strings -Wswitch -Wcast-align -Wchar-subscripts \
+#	-Wredundant-decls -Wextra-tokens \
+#	-Wunreachable-code
 
 # overloaded-virtual warnings are non-fatal (9000888)
 CXXWARNFLAGS_STD += -Wno-error=overloaded-virtual
@@ -165,17 +165,17 @@ CFLAGS_X86_64	= -Dx86_64 -DX86_64 -D__X86_64__ -DLP64 \
 CFLAGS_X86_64H = $(CFLAGS_X86_64)
 
 
-CFLAGS_RELEASEX86_64 = -O2
-CFLAGS_DEVELOPMENTX86_64 = -O2
+CFLAGS_RELEASEX86_64 = -O2 -march=k8 -mno-ssse3 -mno-sse3
+CFLAGS_DEVELOPMENTX86_64 = -O2 -march=k8 -mno-ssse3 -mno-sse3
 # No space optimization for the DEBUG kernel for the benefit of gdb:
-CFLAGS_DEBUGX86_64 = -O0
-CFLAGS_PROFILEX86_64 = -O2
+CFLAGS_DEBUGX86_64 = -O0 -march=k8 -mno-ssse3 -mno-sse3
+CFLAGS_PROFILEX86_64 = -O2 -march=k8 -mno-ssse3 -mno-sse3
 
-CFLAGS_RELEASEX86_64H = -O2
-CFLAGS_DEVELOPMENTX86_64H = -O2
+CFLAGS_RELEASEX86_64H = -O2 -march=k8 -mno-ssse3 -mno-sse3
+CFLAGS_DEVELOPMENTX86_64H = -O2 -march=k8 -mno-ssse3 -mno-sse3
 # No space optimization for the DEBUG kernel for the benefit of gdb:
-CFLAGS_DEBUGX86_64H = -O0
-CFLAGS_PROFILEX86_64H = -O2
+CFLAGS_DEBUGX86_64H = -O0 -march=k8 -mno-ssse3 -mno-sse3
+CFLAGS_PROFILEX86_64H = -O2 -march=k8 -mno-ssse3 -mno-sse3
 
 CFLAGS_RELEASEARM = -O2
 CFLAGS_DEVELOPMENTARM = -O2

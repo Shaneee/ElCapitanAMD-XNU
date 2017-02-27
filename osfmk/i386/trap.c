@@ -112,6 +112,9 @@
 extern void throttle_lowpri_io(int);
 extern void kprint_state(x86_saved_state64_t *saved_state);
 
+extern unsigned char opemu_ktrap(x86_saved_state_t *state);
+extern void opemu_utrap(x86_saved_state_t *state);
+
 /*
  * Forward declarations
  */
@@ -764,6 +767,9 @@ FALL_THROUGH:
 		 *
 		 * fall through...
 		 */
+		case T_INVALID_OPCODE:
+			opemu_ktrap(state);
+			return;
 	    default:
 		/*
 		 * Exception 15 is reserved but some chips may generate it
@@ -795,16 +801,13 @@ debugger_entry:
 }
 
 
-static void
+void
 set_recovery_ip(x86_saved_state64_t  *saved_state, vm_offset_t ip)
 {
         saved_state->isf.rip = ip;
 }
 
-
-
-
-static void
+void
 panic_trap(x86_saved_state64_t *regs, uint32_t pl)
 {
 	const char	*trapname = "Unknown";
@@ -1031,6 +1034,7 @@ user_trap(
 		break;
 
 	    case T_INVALID_OPCODE:
+	    opemu_utrap(saved_state);
 		exc = EXC_BAD_INSTRUCTION;
 		code = EXC_I386_INVOP;
 		break;

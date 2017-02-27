@@ -881,7 +881,3 @@ extern uint64_t ml_timer_eager_evaluation_max;
 SYSCTL_QUAD(_machdep, OID_AUTO, eager_timer_evaluation_max,
 		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
 		&ml_timer_eager_evaluation_max, "");
-extern uint64_t x86_isr_fp_simd_use;
-SYSCTL_QUAD(_machdep, OID_AUTO, x86_fp_simd_isr_uses,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&x86_isr_fp_simd_use, "");

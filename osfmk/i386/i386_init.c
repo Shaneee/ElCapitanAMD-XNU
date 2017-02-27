@@ -524,6 +524,7 @@ static void
 do_init_slave(boolean_t fast_restart)
 {
 	void	*init_param	= FULL_SLAVE_INIT;
+    int boot_arg = 0;
 
 	postcode(I386_INIT_SLAVE);
 
@@ -568,7 +569,8 @@ do_init_slave(boolean_t fast_restart)
 	    pat_init();
 #endif
 
-	cpu_thread_init();	/* not strictly necessary */
+    if (!PE_parse_boot_argn("-nokthreads", &boot_arg, sizeof(boot_arg)))
+        cpu_thread_init();	/* not strictly necessary */
 
 	cpu_init();	/* Sets cpu_running which starter cpu waits for */
  	slave_main(init_param);

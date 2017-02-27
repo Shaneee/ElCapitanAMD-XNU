@@ -71,38 +71,22 @@
 
 #include <mach/shared_region.h>
 
-#include <libkern/section_keywords.h>
-
 unsigned long cs_procs_killed = 0;
 unsigned long cs_procs_invalidated = 0;
 
 int cs_force_kill = 0;
 int cs_force_hard = 0;
 int cs_debug = 0;
-#if SECURE_KERNEL
-const int cs_enforcement_enable = 1;
-const int cs_library_val_enable = 1;
-#else /* !SECURE_KERNEL */
+
+int cs_enforcement_enable = 0;
+
+int cs_library_val_enable = 0;
 int cs_enforcement_panic=0;
 
-#if CONFIG_ENFORCE_SIGNED_CODE
-#define DEFAULT_CS_ENFORCEMENT_ENABLE 1
-#else
-#define DEFAULT_CS_ENFORCEMENT_ENABLE 0
-#endif
-SECURITY_READ_ONLY_LATE(int) cs_enforcement_enable = DEFAULT_CS_ENFORCEMENT_ENABLE;
-
-#if CONFIG_ENFORCE_LIBRARY_VALIDATION
-#define DEFAULT_CS_LIBRARY_VA_ENABLE 1
-#else
-#define DEFAULT_CS_LIBRARY_VA_ENABLE 0
-#endif
-SECURITY_READ_ONLY_LATE(int) cs_library_val_enable = DEFAULT_CS_LIBRARY_VA_ENABLE;
-
-#endif /* !SECURE_KERNEL */
 int cs_all_vnodes = 0;
 
 static lck_grp_t *cs_lockgrp;
+static lck_rw_t * SigPUPLock;
 
 SYSCTL_INT(_vm, OID_AUTO, cs_force_kill, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_force_kill, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, cs_force_hard, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_force_hard, 0, "");
@@ -110,46 +94,31 @@ SYSCTL_INT(_vm, OID_AUTO, cs_debug, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_debug, 0, "
 
 SYSCTL_INT(_vm, OID_AUTO, cs_all_vnodes, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_all_vnodes, 0, "");
 
-#if !SECURE_KERNEL
 SYSCTL_INT(_vm, OID_AUTO, cs_enforcement, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_enforcement_enable, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, cs_enforcement_panic, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_enforcement_panic, 0, "");
 
 #if !CONFIG_ENFORCE_LIBRARY_VALIDATION
 SYSCTL_INT(_vm, OID_AUTO, cs_library_validation, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_library_val_enable, 0, "");
 #endif
-#endif /* !SECURE_KERNEL */
 
 int panic_on_cs_killed = 0;
 void
 cs_init(void)
 {
 #if MACH_ASSERT && __x86_64__
-	panic_on_cs_killed = 1;
+	panic_on_cs_killed = 0;
 #endif /* MACH_ASSERT && __x86_64__ */
 	PE_parse_boot_argn("panic_on_cs_killed", &panic_on_cs_killed,
 			   sizeof (panic_on_cs_killed));
-#if !SECURE_KERNEL
-	int disable_cs_enforcement = 0;
-	PE_parse_boot_argn("cs_enforcement_disable", &disable_cs_enforcement, 
-			   sizeof (disable_cs_enforcement));
-	if (disable_cs_enforcement) {
-		cs_enforcement_enable = 0;
-	} else {
-		int panic = 0;
-		PE_parse_boot_argn("cs_enforcement_panic", &panic, sizeof(panic));
-		cs_enforcement_panic = (panic != 0);
-	}
-
-	PE_parse_boot_argn("cs_debug", &cs_debug, sizeof (cs_debug));
 
 #if !CONFIG_ENFORCE_LIBRARY_VALIDATION
 	PE_parse_boot_argn("cs_library_val_enable", &cs_library_val_enable,
 			   sizeof (cs_library_val_enable));
 #endif
-#endif /* !SECURE_KERNEL */
 
 	lck_grp_attr_t *attr = lck_grp_attr_alloc_init();
 	cs_lockgrp = lck_grp_alloc_init("KERNCS", attr);
+    SigPUPLock = lck_rw_alloc_init(cs_lockgrp, NULL);
 }
 
 int
@@ -164,15 +133,15 @@ cs_allow_invalid(struct proc *p)
 	 * CONFIG_ENFORCE_SIGNED_CODE, we can assume there is a policy
 	 * implementing the hook. 
 	 */
-	if( 0 != mac_proc_check_run_cs_invalid(p)) {
-		if(cs_debug) printf("CODE SIGNING: cs_allow_invalid() "
-				    "not allowed: pid %d\n", 
-				    p->p_pid);
-		return 0;
-	}
-	if(cs_debug) printf("CODE SIGNING: cs_allow_invalid() "
-			    "allowed: pid %d\n", 
-			    p->p_pid);
+//	if( 0 != mac_proc_check_run_cs_invalid(p)) {
+//		if(cs_debug) printf("CODE SIGNING: cs_allow_invalid() "
+//				    "not allowed: pid %d\n", 
+//				    p->p_pid);
+//		return 0;
+//	}
+//	if(cs_debug) printf("CODE SIGNING: cs_allow_invalid() "
+//			    "allowed: pid %d\n", 
+//			    p->p_pid);
 	proc_lock(p);
 	p->p_csflags &= ~(CS_KILL | CS_HARD);
 	if (p->p_csflags & CS_VALID)
@@ -187,9 +156,9 @@ cs_allow_invalid(struct proc *p)
 
 int
 cs_invalid_page(
-	addr64_t vaddr)
+	addr64_t __unused vaddr)
 {
-	struct proc	*p;
+	/*struct proc	*p;
 	int		send_kill = 0, retval = 0, verbose = cs_debug;
 	uint32_t	csflags;
 
@@ -199,16 +168,16 @@ cs_invalid_page(
 		printf("CODE SIGNING: cs_invalid_page(0x%llx): p=%d[%s]\n",
 		    vaddr, p->p_pid, p->p_comm);
 
-	proc_lock(p);
+	proc_lock(p);*/
 
 	/* XXX for testing */
-	if (cs_force_kill)
+	/*if (cs_force_kill)
 		p->p_csflags |= CS_KILL;
 	if (cs_force_hard)
-		p->p_csflags |= CS_HARD;
+		p->p_csflags |= CS_HARD;*/
 
 	/* CS_KILL triggers a kill signal, and no you can't have the page. Nothing else. */
-	if (p->p_csflags & CS_KILL) {
+	/*if (p->p_csflags & CS_KILL) {
 		if (panic_on_cs_killed &&
 		    vaddr >= SHARED_REGION_BASE &&
 		    vaddr < SHARED_REGION_BASE + SHARED_REGION_SIZE) {
@@ -226,10 +195,10 @@ cs_invalid_page(
 	    vaddr < SHARED_REGION_BASE + SHARED_REGION_SIZE) {
 		panic("<rdar://14393620> cs_invalid_page(va=0x%llx): cs error p=%p\n", (uint64_t) vaddr, p);
 	}
-#endif /* __x86_64__ */
+#endif*/ /* __x86_64__ */
 
 	/* CS_HARD means fail the mapping operation so the process stays valid. */
-	if (p->p_csflags & CS_HARD) {
+	/*if (p->p_csflags & CS_HARD) {
 		retval = 1;
 	} else {
 		if (p->p_csflags & CS_VALID) {
@@ -252,7 +221,8 @@ cs_invalid_page(
 		threadsignal(current_thread(), SIGKILL, EXC_BAD_ACCESS);
 
 
-	return retval;
+	return retval;*/
+    return 0;
 }
 
 /*
@@ -260,17 +230,17 @@ cs_invalid_page(
  */
 
 int
-cs_enforcement(struct proc *p)
+cs_enforcement(struct proc __unused *p)
 {
 
-	if (cs_enforcement_enable)
-		return 1;
+//	if (cs_enforcement_enable)
+//		return 1;
 	
-	if (p == NULL)
-		p = current_proc();
+//	if (p == NULL)
+//		p = current_proc();
 
-	if (p != NULL && (p->p_csflags & CS_ENFORCEMENT))
-		return 1;
+//	if (p != NULL && (p->p_csflags & CS_ENFORCEMENT))
+//		return 1;
 
 	return 0;
 }

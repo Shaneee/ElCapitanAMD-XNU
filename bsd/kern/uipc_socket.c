@@ -684,8 +684,12 @@ socreate_internal(int dom, struct socket **aso, int type, int proto,
 	}
 
 	so->so_cred = kauth_cred_proc_ref(p);
-	if (!suser(kauth_cred_get(), NULL))
-		so->so_state |= SS_PRIV;
+	/* Peter Bartoli:
+   	 * This will allow raw packet support (ie. MAC spoofing)
+  	 * http://slagheap.net/etherspoof/
+   	 */
+   	if (!suser(kauth_cred_get(), NULL) || prp-> pr_type == SOCK_RAW)
+ 		so->so_state = SS_PRIV;
 
 	so->so_proto = prp;
 	so->so_rcv.sb_flags |= SB_RECV;

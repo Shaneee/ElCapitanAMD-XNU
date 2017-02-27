@@ -39,6 +39,15 @@ const char * gIOKernelConfigTables =
 "     'IOProviderClass' = IOPlatformExpertDevice;"
 "     'IOProbeScore'    = 0:32;"
 "   }"
+#if defined(I386) || defined(X86_64)
+/* added during testign with old RTC, enables old RTC driver. */
+"   ,"
+"   {"
+"       'IOClass'           = AppleIntelClock;"
+"       'IOProviderClass'   = IOPlatformDevice;"
+"       'IONameMatch'       = intel-clock;"
+"   }"
+#endif /* I386 */
 ")";
 
 /* This stuff is no longer used at all but was exported in prior

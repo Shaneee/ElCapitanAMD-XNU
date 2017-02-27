@@ -53,6 +53,93 @@ static	boolean_t	cpuid_dbg
 #define bitmask32(h,l)		((bit32(h)|(bit32(h)-1)) & ~(bit32(l)-1))
 #define bitfield32(x,h,l)	((((x) & bitmask32(h,l)) >> l))
 
+boolean_t ForceAmdCpu = FALSE;
+
+/* For AMD CPU's */
+/* CPUID			eax			ebx			ecx			edx
+ * 0x00000000		0x00000005	0x68747541	0x444D4163	0x69746E65
+ *
+ * ebx=HEX:41757468 ASCII=Auth
+ * ecx=HEX:63414D44 ASCII=cAMD
+ * edx=HEX:656E7469 ASCII=enti
+ * ebx+edx+ecx ASCII=AuthenticAMD
+ */
+
+boolean_t IsAmdCPU(void) {
+    if (ForceAmdCpu)
+        return TRUE;
+    
+    uint32_t ourcpuid[4];
+    do_cpuid(0, ourcpuid);
+    if (ourcpuid[ebx] == 0x68747541 &&
+        ourcpuid[ecx] == 0x444D4163 &&
+        ourcpuid[edx] == 0x69746E65)
+        return TRUE;
+    
+    return FALSE;
+};
+
+/* For Intel CPU's */
+/* CPUID			eax			ebx			ecx			edx
+ * 0x00000000		0x00000005	0x756E6547	0x6C65746E	0x49656E69
+ *
+ * ebx=HEX:47656E75 ASCII=Genu
+ * ecx=HEX:6E74656C ASCII=ntel
+ * edx=HEX:696E6549 ASCII=ineI
+ * ebx+edx+ecx ASCII=GenuineIntel
+ */
+
+boolean_t IsIntelCPU(void) {
+    uint32_t ourcpuid[4];
+    do_cpuid(0, ourcpuid);
+    if (ourcpuid[ebx] == 0x756E6547 &&
+        ourcpuid[ecx] == 0x6C65746E &&
+        ourcpuid[edx] == 0x49656E69)
+        return TRUE;
+    
+    if (!IsAmdCPU())
+        return TRUE;
+    
+    return FALSE;
+}
+
+uint32_t
+extractBitField(uint32_t inField, uint32_t width, uint32_t offset)
+{
+    uint32_t bitMask;
+    uint32_t outField;
+
+    if ((offset+width) == 32)
+    {
+        bitMask = (0xFFFFFFFF<<offset);
+    }
+    else
+    {
+        bitMask = (0xFFFFFFFF<<offset) ^ (0xFFFFFFFF<<(offset+width));
+    }
+
+    outField = (inField & bitMask) >> offset;
+    return outField;
+}
+
+uint32_t
+getBitFieldWidth(uint32_t number)
+{
+    uint32_t fieldWidth;
+
+    number--;
+    if (number == 0)
+    {
+        return 0;
+    }
+    
+    __asm__ volatile ( "bsr %%eax, %%ecx\n\t"
+                      : "=c" (fieldWidth)
+                      : "a"(number));
+
+    return fieldWidth+1;  /* bsr returns the position, we want the width */
+}
+
 /*
  * Leaf 2 cache descriptor encodings.
  */
@@ -233,243 +320,480 @@ static i386_cpu_info_t	*cpuid_cpu_infop = NULL;
 
 static void cpuid_fn(uint32_t selector, uint32_t *result)
 {
-	do_cpuid(selector, result);
-	DBG("cpuid_fn(0x%08x) eax:0x%08x ebx:0x%08x ecx:0x%08x edx:0x%08x\n",
-		selector, result[0], result[1], result[2], result[3]);
+    do_cpuid(selector, result);
 }
 
-static const char *cache_type_str[LCACHE_MAX] = {
-	"Lnone", "L1I", "L1D", "L2U", "L3U"
-};
+/* This function is AMD specific */
+static void
+cpuid_set_amd_cache_info( i386_cpu_info_t * info_p )
+{
+    uint32_t	reg[4];
+    uint32_t	linesizes[LCACHE_MAX];
+    cache_type_t	type;
+    uint32_t	colors;
+    
+    bzero( linesizes, sizeof(linesizes) );
+    
+    /* get number of cores in processor */
+    /* No HT on AMD so logicals = cores */
+    cpuid_fn(0x80000008, reg);
+    info_p->cpuid_cores_per_package = bitfield32(reg[ecx], 7, 0) + 1;
+    
+    /* AnV - Avoid 0 cores */
+    if (info_p->cpuid_cores_per_package == 0)
+        info_p->cpuid_cores_per_package = 1;
+    
+    info_p->cpuid_logical_per_package = info_p->cpuid_cores_per_package;
+    
+    /* L1 Data */
+    {
+        type = L1D;
+        cpuid_fn(0x80000005, reg);
+        uint32_t cpuid_c_linesize	= bitfield32(reg[ecx], 7,  0);
+        uint32_t cpuid_c_partitions	= bitfield32(reg[ecx], 15, 8);
+        uint32_t cpuid_c_associativity	= bitfield32(reg[ecx], 23, 16);
+        uint32_t cpuid_c_size		= bitfield32(reg[ecx], 31, 24);
+        
+        uint32_t cache_associativity	= cpuid_c_associativity;
+        
+        // size reported in KB.
+        info_p->cache_size[type]  	= cpuid_c_size * 1024;
+        info_p->cache_sharing[type] 	= 1;
+        info_p->cache_partitions[type]	= cpuid_c_partitions;
+        
+        linesizes[type] = cpuid_c_linesize;
+        uint32_t cache_sets = info_p->cache_size[type] / (cpuid_c_partitions * cpuid_c_linesize * cache_associativity);
+        
+        colors = ( cpuid_c_linesize * cache_sets ) >> 12;
+        if ( colors > vm_cache_geometry_colors )
+            vm_cache_geometry_colors = colors;
+    }
+    /* L1 Instruction */
+    {
+        type = L1I;
+        cpuid_fn(0x80000005, reg);
+        uint32_t cpuid_c_linesize	= bitfield32(reg[edx], 7,  0);
+        uint32_t cpuid_c_partitions	= bitfield32(reg[edx], 15, 8);
+        uint32_t cpuid_c_associativity	= bitfield32(reg[edx], 23, 16);
+        uint32_t cpuid_c_size		= bitfield32(reg[edx], 31, 24);
+        
+        uint32_t cache_associativity	= cpuid_c_associativity;
+        
+        // size reported in KB.
+        info_p->cache_size[type]  	= cpuid_c_size * 1024;
+        info_p->cache_sharing[type] 	= 1;
+        info_p->cache_partitions[type]	= cpuid_c_partitions;
+        
+        linesizes[type] = cpuid_c_linesize;
+        uint32_t cache_sets = info_p->cache_size[type] / (cpuid_c_partitions * cpuid_c_linesize * cache_associativity);
+        
+        colors = ( cpuid_c_linesize * cache_sets ) >> 12;
+        if ( colors > vm_cache_geometry_colors )
+            vm_cache_geometry_colors = colors;
+    }
+    /* L2 Unified */
+    {
+        type = L1D;
+        cpuid_fn(0x80000006, reg);
+        uint32_t cpuid_c_linesize	= bitfield32(reg[ecx], 7,  0);
+        uint32_t cpuid_c_partitions	= bitfield32(reg[ecx], 11, 8);
+        uint32_t cpuid_c_associativity	= bitfield32(reg[ecx], 15, 12);
+        uint32_t cpuid_c_size		= bitfield32(reg[ecx], 31, 16);
+        
+        // Special formula for associativity:  2^(assoc / 2)
+        uint32_t cache_associativity	= 1ul << (cpuid_c_associativity / 2);
+        
+        // size reported in KB.
+        info_p->cache_size[type]  	= cpuid_c_size * 1024;
+        info_p->cache_sharing[type] 	= 1;
+        info_p->cache_partitions[type]	= cpuid_c_partitions;
+        
+        linesizes[type] = cpuid_c_linesize;
+        uint32_t cache_sets = info_p->cache_size[type] / (cpuid_c_partitions * cpuid_c_linesize * cache_associativity);
+        
+        colors = ( cpuid_c_linesize * cache_sets ) >> 12;
+        if ( colors > vm_cache_geometry_colors )
+            vm_cache_geometry_colors = colors;
+        
+        // use for cache size etc.
+        info_p->cpuid_cache_L2_associativity = cache_associativity;
+        info_p->cpuid_cache_size	= info_p->cache_size[type];
+        info_p->cache_linesize		= cpuid_c_linesize;
+    }
+    /* L3 Unified */
+    {
+        type = L1D;
+        cpuid_fn(0x80000006, reg);
+        uint32_t cpuid_c_linesize	= bitfield32(reg[edx], 7,  0);
+        uint32_t cpuid_c_partitions	= bitfield32(reg[edx], 11, 8);
+        uint32_t cpuid_c_associativity	= bitfield32(reg[edx], 15, 12);
+        uint32_t cpuid_c_size		= bitfield32(reg[edx], 31, 18);
+        
+        // Special formula for associativity:  2^(assoc / 2)
+        uint32_t cache_associativity	= 1ul << (cpuid_c_associativity / 2);
+        
+        if(cpuid_c_size == 0) {
+            // no L3
+            info_p->cache_size[type]  	= 0;
+            info_p->cache_sharing[type] 	= 0;
+            info_p->cache_partitions[type]	= 0;
+        } else {
+            // size reported in 512 KB packs.
+            info_p->cache_size[type]  	= cpuid_c_size * 1024;
+            info_p->cache_sharing[type] 	= 1;
+            info_p->cache_partitions[type]	= cpuid_c_partitions;
+            
+            linesizes[type] = cpuid_c_linesize;
+            uint32_t cache_sets = info_p->cache_size[type] / (cpuid_c_partitions * cpuid_c_linesize * cache_associativity);
+            
+            colors = ( cpuid_c_linesize * cache_sets ) >> 12;
+            if ( colors > vm_cache_geometry_colors )
+                vm_cache_geometry_colors = colors;
+        }
+    }
+}
+
+
+static uint32_t amdGetAssociativity(uint32_t flag)
+{
+	uint32_t asso = 0;
+
+    switch ( flag )
+    {
+        case 0: asso = 0; break;
+        case 1: asso = 1; break;
+        case 2: asso = 2; break;
+        case 4: asso = 4; break;
+        case 6: asso = 8; break;
+        case 8: asso = 16; break;
+        case 10: asso = 32; break;
+        case 11: asso = 48; break;
+        case 12: asso = 64; break;
+        case 13: asso = 96; break;
+        case 14: asso = 128; break;
+        case 15: asso = 0; break;
+        default: break;
+    }
+    return asso;
+}
+
+/************************************************
+ ********* AMD L/1/2/3 Cache Calculate **********
+ ************************************************/
+static
+void
+get_amd_cache_info(i386_cpu_info_t *info_p)
+{
+    uint32_t	reg[4] = {0, 0, 0, 0};
+    uint32_t    cpuid_result[4];
+    uint32_t	cache_level;
+    uint32_t	cache_partitions;
+    uint32_t	cache_sharing;
+    uint32_t	cache_linesize;
+    uint32_t	cache_associativity;
+    uint32_t	cache_size;
+    uint32_t	cache_byte;
+    uint32_t	cache_sets;
+    uint32_t	colors;
+    uint32_t	cache_type;
+    cache_type_t    type = Lnone;
+    uint32_t	linesizes[LCACHE_MAX];
+    bzero( linesizes, sizeof(linesizes) );
+    uint32_t asso = 0;
+
+    uint32_t    cores;
+    boolean_t	cpuid_deterministic_supported = FALSE;
+
+    cpuid_fn(0x80000008, reg);
+    cores = bitfield32(reg[ecx],7,0)+1;
+    info_p->cpuid_cores_per_package = cores;
+
+    //cpuid_fn(0x80000005, reg);
+    //uint32_t L1DLinesPerTag = bitfield32(reg[ecx], 11, 8);
+    //uint32_t L1ILinesPerTag = bitfield32(reg[edx], 11, 8);
+
+    cpuid_fn(0x80000006, reg);
+    //uint32_t L2ULinesPerTag = bitfield32(reg[ecx], 11, 8);
+    uint32_t L3ULinesPerTag = bitfield32(reg[edx], 11, 8);
+
+    int i=0;
+
+    /* Intel cache_sharing Is AMD L1/2/3 Cache thread(s).
+     * AMD Family 0Fh-14h Processor L1&L2 Cache thread(s) is 1.
+     * AMD 10h Phenom & PhenomII L3 Cache thread(s) is Core Number.
+     */
+    if (info_p->cpuid_family < 21)
+    {
+
+    	for ( i = 1; i<5 ; i++)
+    	{
+    		switch (i)
+    		{
+    			case 1:
+    			{
+    				type = 1 == 1 ? L1D : Lnone;
+    				cpuid_fn(0x80000005, reg);
+    				cache_byte = bitfield32(reg[ecx],31,24);
+    				cache_linesize = bitfield32(reg[ecx],7,0);
+    				cache_associativity = bitfield32(reg[ecx],23,16);
+    				cache_sharing = bitfield32(reg[ecx], 11, 8);
+    				cache_partitions = bitfield32(reg[ecx], 11, 8);
+
+    				cache_size = cache_byte * 1024;
+    				cache_sets = cache_size / (cache_associativity * cache_linesize);
+    				info_p->cache_size[L1D] = cache_size;
+    				info_p->cache_sharing[L1D] = cache_sharing;
+    				info_p->cache_partitions[L1D] = cache_partitions;
+    				linesizes[L1D] = cache_linesize;
+    				info_p->cache_linesize = linesizes[L1D];
+
+    				colors = ( cache_linesize * cache_sets ) >> 12;
+    				if ( colors > vm_cache_geometry_colors )
+    					vm_cache_geometry_colors = colors ;
+    			}
+    			break;
+
+    			case 2:
+    			{
+    				type = 2 == 2 ? L1I : Lnone;
+    				cpuid_fn(0x80000005, reg);
+    				cache_byte = bitfield32(reg[edx],31,24);
+    				cache_linesize = bitfield32(reg[edx],7,0);
+    				cache_associativity = bitfield32(reg[edx],23,16);
+    				cache_sharing = bitfield32(reg[edx], 11, 8);
+    				cache_partitions = bitfield32(reg[edx], 11, 8);
+
+    				cache_size = cache_byte * 1024;
+    				cache_sets = cache_size / (cache_associativity * cache_linesize);
+    				info_p->cache_size[L1I] = cache_size;
+    				info_p->cache_sharing[L1I] = cache_sharing;
+    				info_p->cache_partitions[L1I] = cache_partitions;
+    				linesizes[L1I] = cache_linesize;
+    				info_p->cache_linesize = linesizes[L1I];
+
+    				colors = ( cache_linesize * cache_sets ) >> 12;
+    				if ( colors > vm_cache_geometry_colors )
+    					vm_cache_geometry_colors = colors ;
+    			}
+    			break;
+
+    			case 3:
+    			{
+    				type = 3 == 3 ? L2U : Lnone;
+    				cpuid_fn(0x80000006, reg);
+    				cache_byte = bitfield32(reg[ecx],31,16);
+    				cache_linesize = bitfield32(reg[ecx],7,0);
+    				asso = bitfield32(reg[ecx],15,12);
+    				cache_associativity = amdGetAssociativity(asso);
+    				cache_sharing = bitfield32(reg[ecx], 11, 8);
+    				cache_partitions = bitfield32(reg[ecx], 11, 8);
+
+    				cache_size = cache_byte * 1024;
+    				cache_sets = cache_size / (cache_associativity * cache_linesize);
+    				info_p->cache_size[L2U] = cache_size;
+    				info_p->cache_sharing[L2U] = cache_sharing;
+    				info_p->cache_partitions[L2U] = cache_partitions;
+    				linesizes[L2U] = cache_linesize;
+    				info_p->cache_linesize = linesizes[L2U];
+
+    				info_p->cpuid_cache_L2_associativity = cache_associativity;
+
+    				colors = ( cache_linesize * cache_sets ) >> 12;
+    				if ( colors > vm_cache_geometry_colors )
+    					vm_cache_geometry_colors = colors ;
+    			}
+    			break;
+
+    			case 4:
+    			{
+    				/*
+    				//Dev Emulate TEST Code
+    				type = 3 == 3 ? L3U : Lnone;
+    				cache_byte = 8; //4=2MB 8=4MB 12=6MB 16=8MB
+    				cache_linesize = 64;
+    				asso = 12;
+    				cache_associativity = amdGetAssociativity(asso);
+    				cache_partitions = 1;
+
+    				cache_size = cache_byte * 512 * 1024;
+    				cache_sets = cache_size / (cache_associativity * cache_linesize);
+    				info_p->cache_size[L3U] = cache_size;
+    				info_p->cache_sharing[L3U] = cores;
+    				info_p->cache_partitions[L3U] = cache_partitions;
+    				linesizes[L3U] = cache_linesize;
+    				info_p->cache_linesize = linesizes[L3U];
+
+    				colors = ( cache_linesize * cache_sets ) >> 12;
+    				if ( colors > vm_cache_geometry_colors )
+    					vm_cache_geometry_colors = colors;
+    				*/
+    				if (L3ULinesPerTag)
+    				{
+    					type = 3 == 3 ? L3U : Lnone;
+    					cpuid_fn(0x80000006, reg);
+    					cache_byte = bitfield32(reg[edx],31,18);
+    					cache_linesize = bitfield32(reg[edx],7,0);
+    					asso = bitfield32(reg[edx],15,12);
+    					cache_associativity = amdGetAssociativity(asso);
+    					cache_partitions = bitfield32(reg[edx], 11, 8);
+
+						cache_size = cache_byte * 512 * 1024;
+						cache_sets = cache_size / (cache_associativity * cache_linesize);
+						info_p->cache_size[L3U] = cache_size;
+						info_p->cache_sharing[L3U] = cores;
+						info_p->cache_partitions[L3U] = cache_partitions;
+						linesizes[L3U] = cache_linesize;
+						info_p->cache_linesize = linesizes[L3U];
+
+    					colors = ( cache_linesize * cache_sets ) >> 12;
+    					if ( colors > vm_cache_geometry_colors )
+    						vm_cache_geometry_colors = colors ;
+    				}
+    			}
+    			break;
+
+    			case Lnone:
+    			default:
+    				return;
+    		}
+    	} 
+    } //10h-14h END
+	else //15h-16h
+	{
+    	cpuid_fn(0x8000001D, cpuid_result);
+    	if (cpuid_result[eax] >= 4)
+    		cpuid_deterministic_supported = TRUE;
+
+    	for (i = 0; cpuid_deterministic_supported ; i++)
+    	{
+    		reg[eax] = 0x8000001D;
+    		reg[ecx] = i;
+    		cpuid(reg);
+
+    		DBG("cpuid(0x8000001D) i=%d eax=0x%x\n", i, reg[eax]);
+    		cache_type = bitfield32(reg[eax], 4, 0);
+    		if (cache_type == 0) break;
+    		cache_level = bitfield32(reg[eax],  7,  5);
+    		cache_sharing = bitfield32(reg[eax], 25, 14) + 1;
+    		cache_linesize = bitfield32(reg[ebx], 11,  0) + 1;
+    		cache_partitions = bitfield32(reg[ebx], 21, 12) + 1;
+    		cache_associativity	= bitfield32(reg[ebx], 31, 22) + 1;
+    		cache_sets = bitfield32(reg[ecx], 31,  0) + 1;
+
+    		switch (cache_level)
+    		{
+    			case 1:
+    				type = cache_type == 1 ? L1D :
+    				cache_type == 2 ? L1I : Lnone;
+    				break;
+    			case 2:
+    				type = cache_type == 3 ? L2U : Lnone;
+    				break;
+    			case 3:
+    				type = cache_type == 3 ? L3U : Lnone;
+    				break;
+    			default:
+    				type = Lnone;
+    		}
+
+    		if (type != Lnone)
+    		{
+    			cache_size = cache_linesize * cache_sets * cache_associativity * cache_partitions;
+
+    			info_p->cache_size[type] = cache_size;
+    			info_p->cache_sharing[type] = cache_sharing;
+    			info_p->cache_partitions[type] = cache_partitions;
+    			linesizes[type] = cache_linesize;
+    			info_p->cache_linesize = linesizes[type];
+
+    			if (type == L2U)
+    				info_p->cpuid_cache_L2_associativity = cache_associativity;
+
+    			colors = ( cache_linesize * cache_sets ) >> 12;
+    			if ( colors > vm_cache_geometry_colors )
+    				vm_cache_geometry_colors = colors;
+    		}
+    	}
+    } //15h-16h END
+
+	if (info_p->cpuid_cores_per_package == 0)
+	{
+		info_p->cpuid_cores_per_package = 1;
+
+             info_p->cache_size[L2U] = info_p->cpuid_cache_size * 1024;
+             info_p->cache_sharing[L2U] = 1;
+             info_p->cache_partitions[L2U] = 1;
+             
+             linesizes[L2U] = info_p->cpuid_cache_linesize;
+             
+             DBG(" cache_size[L2U]      : %d\n", info_p->cache_size[L2U]);
+             DBG(" cache_sharing[L2U]   : 1\n");
+             DBG(" cache_partitions[L2U]: 1\n");
+             DBG(" linesizes[L2U]       : %d\n", info_p->cpuid_cache_linesize);
+	}
+
+    cpuid_fn(0x80000005, reg);
+    uint32_t L1DTlb2and4MSize  = (uint32_t)bitfield32(reg[eax], 23, 16);
+    uint32_t L1ITlb2and4MSize  = (uint32_t)bitfield32(reg[eax], 7, 0);
+    uint32_t L1DTlb4KSize = (uint32_t)bitfield32(reg[ebx], 23, 16);
+    uint32_t L1ITlb4KSize = (uint32_t)bitfield32(reg[ebx], 7, 0);
+
+    cpuid_fn(0x80000006, reg);
+    uint32_t L2DTlb2and4MSize = (uint32_t)bitfield32(reg[eax], 27, 16);
+    uint32_t L2ITlb2and4MSize = (uint32_t)bitfield32(reg[eax], 11, 0);
+    uint32_t L2DTlb4KSize = (uint32_t)bitfield32(reg[ebx], 27, 16);
+    uint32_t L2ITlb4KSize = (uint32_t)bitfield32(reg[ebx], 11, 0);
+
+    info_p->cpuid_tlb[0][0][0] =  L1ITlb4KSize;
+    info_p->cpuid_tlb[1][0][0] =  L1DTlb4KSize;
+    info_p->cpuid_tlb[0][0][1] =  L2ITlb4KSize;
+    info_p->cpuid_tlb[1][0][1] =  L2DTlb4KSize;
+    info_p->cpuid_tlb[0][1][0] =  L1ITlb2and4MSize;
+    info_p->cpuid_tlb[1][1][0] =  L1DTlb2and4MSize;
+    info_p->cpuid_tlb[0][1][1] =  L2ITlb2and4MSize;
+    info_p->cpuid_tlb[1][1][1] =  L2DTlb2and4MSize;
+}
 
 /* this function is Intel-specific */
 static void
 cpuid_set_cache_info( i386_cpu_info_t * info_p )
 {
-	uint32_t	cpuid_result[4];
-	uint32_t	reg[4];
-	uint32_t	index;
-	uint32_t	linesizes[LCACHE_MAX];
-	unsigned int	i;
-	unsigned int	j;
-	boolean_t	cpuid_deterministic_supported = FALSE;
-
-	DBG("cpuid_set_cache_info(%p)\n", info_p);
-
-	bzero( linesizes, sizeof(linesizes) );
-
-	/* Get processor cache descriptor info using leaf 2.  We don't use
-	 * this internally, but must publish it for KEXTs.
-	 */
-	cpuid_fn(2, cpuid_result);
-	for (j = 0; j < 4; j++) {
-		if ((cpuid_result[j] >> 31) == 1) 	/* bit31 is validity */
-			continue;
-		((uint32_t *) info_p->cache_info)[j] = cpuid_result[j];
-	}
-	/* first byte gives number of cpuid calls to get all descriptors */
-	for (i = 1; i < info_p->cache_info[0]; i++) {
-		if (i*16 > sizeof(info_p->cache_info))
-			break;
-		cpuid_fn(2, cpuid_result);
-		for (j = 0; j < 4; j++) {
-			if ((cpuid_result[j] >> 31) == 1) 
-				continue;
-			((uint32_t *) info_p->cache_info)[4*i+j] =
-				cpuid_result[j];
-		}
-	}
-
-	/*
-	 * Get cache info using leaf 4, the "deterministic cache parameters."
-	 * Most processors Mac OS X supports implement this flavor of CPUID.
-	 * Loop over each cache on the processor.
-	 */
-	cpuid_fn(0, cpuid_result);
-	if (cpuid_result[eax] >= 4)
-		cpuid_deterministic_supported = TRUE;
-
-	for (index = 0; cpuid_deterministic_supported; index++) {
-		cache_type_t	type = Lnone;
-		uint32_t	cache_type;
-		uint32_t	cache_level;
-		uint32_t	cache_sharing;
-		uint32_t	cache_linesize;
-		uint32_t	cache_sets;
-		uint32_t	cache_associativity;
-		uint32_t	cache_size;
-		uint32_t	cache_partitions;
-		uint32_t	colors;
-		
-		reg[eax] = 4;		/* cpuid request 4 */
-		reg[ecx] = index;	/* index starting at 0 */
-		cpuid(reg);
-		DBG("cpuid(4) index=%d eax=0x%x\n", index, reg[eax]);
-		cache_type = bitfield32(reg[eax], 4, 0);
-		if (cache_type == 0)
-			break;		/* no more caches */
-		cache_level  		= bitfield32(reg[eax],  7,  5);
-		cache_sharing	 	= bitfield32(reg[eax], 25, 14) + 1;
-		info_p->cpuid_cores_per_package 
-					= bitfield32(reg[eax], 31, 26) + 1;
-		cache_linesize		= bitfield32(reg[ebx], 11,  0) + 1;
-		cache_partitions	= bitfield32(reg[ebx], 21, 12) + 1;
-		cache_associativity	= bitfield32(reg[ebx], 31, 22) + 1;
-		cache_sets 		= bitfield32(reg[ecx], 31,  0) + 1;
-				
-		/* Map type/levels returned by CPUID into cache_type_t */
-		switch (cache_level) {
-		case 1:
-			type = cache_type == 1 ? L1D :
-			       cache_type == 2 ? L1I :
-						 Lnone;
-			break;
-		case 2:
-			type = cache_type == 3 ? L2U :
-						 Lnone;
-			break;
-		case 3:
-			type = cache_type == 3 ? L3U :
-						 Lnone;
-			break;
-		default:
-			type = Lnone;
-		}
-		
-		/* The total size of a cache is:
-		 *	( linesize * sets * associativity * partitions )
-		 */
-		if (type != Lnone) {
-			cache_size = cache_linesize * cache_sets *
-				     cache_associativity * cache_partitions;
-			info_p->cache_size[type] = cache_size;
-			info_p->cache_sharing[type] = cache_sharing;
-			info_p->cache_partitions[type] = cache_partitions;
-			linesizes[type] = cache_linesize;
-
-			DBG(" cache_size[%s]      : %d\n",
-			    cache_type_str[type], cache_size);
-			DBG(" cache_sharing[%s]   : %d\n",
-			    cache_type_str[type], cache_sharing);
-			DBG(" cache_partitions[%s]: %d\n",
-			    cache_type_str[type], cache_partitions);
-
-			/*
-			 * Overwrite associativity determined via
-			 * CPUID.0x80000006 -- this leaf is more
-			 * accurate
-			 */
-			if (type == L2U)
-				info_p->cpuid_cache_L2_associativity = cache_associativity;
-
-			/* Compute the number of page colors for this cache,
-			 * which is:
-			 *	( linesize * sets ) / page_size
-			 *
-			 * To help visualize this, consider two views of a
-			 * physical address.  To the cache, it is composed
-			 * of a line offset, a set selector, and a tag.
-			 * To VM, it is composed of a page offset, a page
-			 * color, and other bits in the pageframe number:
-			 *
-			 *           +-----------------+---------+--------+
-			 *  cache:   |       tag       |   set   | offset |
-			 *           +-----------------+---------+--------+
-			 *
-			 *           +-----------------+-------+----------+
-			 *  VM:      |    don't care   | color | pg offset|
-			 *           +-----------------+-------+----------+
-			 *
-			 * The color is those bits in (set+offset) not covered
-			 * by the page offset.
-			 */
-			 colors = ( cache_linesize * cache_sets ) >> 12;
-			 
-			 if ( colors > vm_cache_geometry_colors )
-				vm_cache_geometry_colors = colors;
-		}
-	} 
-	DBG(" vm_cache_geometry_colors: %d\n", vm_cache_geometry_colors);
-	
-	/*
-	 * If deterministic cache parameters are not available, use
-	 * something else
-	 */
-	if (info_p->cpuid_cores_per_package == 0) {
-		info_p->cpuid_cores_per_package = 1;
-
-		/* cpuid define in 1024 quantities */
-		info_p->cache_size[L2U] = info_p->cpuid_cache_size * 1024;
-		info_p->cache_sharing[L2U] = 1;
-		info_p->cache_partitions[L2U] = 1;
-
-		linesizes[L2U] = info_p->cpuid_cache_linesize;
-
-		DBG(" cache_size[L2U]      : %d\n",
-		    info_p->cache_size[L2U]);
-		DBG(" cache_sharing[L2U]   : 1\n");
-		DBG(" cache_partitions[L2U]: 1\n");
-		DBG(" linesizes[L2U]       : %d\n",
-		    info_p->cpuid_cache_linesize);
-	}
-	
-	/*
-	 * What linesize to publish?  We use the L2 linesize if any,
-	 * else the L1D.
-	 */
-	if ( linesizes[L2U] )
-		info_p->cache_linesize = linesizes[L2U];
-	else if (linesizes[L1D])
-		info_p->cache_linesize = linesizes[L1D];
-	else panic("no linesize");
-	DBG(" cache_linesize    : %d\n", info_p->cache_linesize);
-
-	/*
-	 * Extract and publish TLB information from Leaf 2 descriptors.
-	 */
-	DBG(" %ld leaf2 descriptors:\n", sizeof(info_p->cache_info));
-	for (i = 1; i < sizeof(info_p->cache_info); i++) {
-		cpuid_cache_descriptor_t	*descp;
-		int				id;
-		int				level;
-		int				page;
-
-		DBG(" 0x%02x", info_p->cache_info[i]);
-		descp = cpuid_leaf2_find(info_p->cache_info[i]);
-		if (descp == NULL)
-			continue;
-
-		switch (descp->type) {
-		case TLB:
-			page = (descp->size == SMALL) ? TLB_SMALL : TLB_LARGE;
-			/* determine I or D: */
-			switch (descp->level) {
-			case INST:
-				id = TLB_INST;
-				break;
-			case DATA:
-			case DATA0:
-			case DATA1:
-				id = TLB_DATA;
-				break;
-			default:
-				continue;
-			}
-			/* determine level: */
-			switch (descp->level) {
-			case DATA1:
-				level = 1;
-				break;
-			default:
-				level = 0;
-			}
-			info_p->cpuid_tlb[id][page][level] = descp->entries;
-			break;
-		case STLB:
-			info_p->cpuid_stlb = descp->entries;
-		}
-	}
-	DBG("\n");
+    if (IsIntelCPU())
+    {
+        uint32_t	cpuid_result[4];
+        uint32_t	reg[4];
+        uint32_t	index;
+        uint32_t	linesizes[LCACHE_MAX];
+        unsigned int	i;
+        unsigned int	j;
+        boolean_t	cpuid_deterministic_supported = FALSE;
+        
+        DBG("cpuid_set_cache_info(%p)\n", info_p);
+        
+        bzero( linesizes, sizeof(linesizes) );
+        
+        /* Get processor cache descriptor info using leaf 2.  We don't use
+         * this internally, but must publish it for KEXTs.
+         */
+        cpuid_fn(2, cpuid_result);
+        for (j = 0; j < 4; j++) {
+            if ((cpuid_result[j] >> 31) == 1) 	/* bit31 is validity */
+                continue;
+            ((uint32_t *) info_p->cache_info)[j] = cpuid_result[j];
+        }
+        /* first byte gives number of cpuid calls to get all descriptors */
+        for (i = 1; i < info_p->cache_info[0]; i++) {
+            if (i*16 > sizeof(info_p->cache_info))
+                break;
+            cpuid_fn(2, cpuid_result);
+            for (j = 0; j < 4; j++) {
+                if ((cpuid_result[j] >> 31) == 1)
+                    continue;
+                ((uint32_t *) info_p->cache_info)[4*i+j] =
+                cpuid_result[j];
+            }
+        }
+    }
 }
 
 static void
@@ -477,16 +801,27 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 {
 	uint32_t	reg[4];
         char            str[128], *p;
+    unsigned char dummyvar;
 
 	DBG("cpuid_set_generic_info(%p)\n", info_p);
 
-	/* do cpuid 0 to get vendor */
-	cpuid_fn(0, reg);
-	info_p->cpuid_max_basic = reg[eax];
-	bcopy((char *)&reg[ebx], &info_p->cpuid_vendor[0], 4); /* ug */
-	bcopy((char *)&reg[ecx], &info_p->cpuid_vendor[8], 4);
-	bcopy((char *)&reg[edx], &info_p->cpuid_vendor[4], 4);
-	info_p->cpuid_vendor[12] = 0;
+    /* do cpuid 0 to get vendor */
+    static char Genu[5] = "Genu";
+    static char ineI[5] = "ineI";
+    static char ntel[5] = "ntel";
+    
+    /* Made by Bronzovka, adapted by AnV, Further adapted by Shaneee */
+    if (PE_parse_boot_argn("-emulateintel", &dummyvar, sizeof(dummyvar)))
+    {
+        do_cpuid(0, reg);
+        info_p->cpuid_max_basic = reg[eax];
+        bcopy(Genu, (char *)&reg[ebx], 4); /* ug */
+        bcopy(ntel, (char *)&reg[ecx], 4);
+        bcopy(ineI, (char *)&reg[edx], 4);
+    } else {
+        do_cpuid(0, reg);
+        info_p->cpuid_max_basic = reg[eax];
+    }
 
 	/* get extended cpuid results */
 	cpuid_fn(0x80000000, reg);
@@ -534,12 +869,8 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		 * Overwritten by associativity as determined via CPUID.4
 		 * if available.
 		 */
-		if (assoc == 6)
-			assoc = 8;
-		else if (assoc == 8)
-			assoc = 16;
-		else if (assoc == 0xF)
-			assoc = 0xFFFF;
+		// AMD CPU Only
+		assoc = amdGetAssociativity(assoc);
 		info_p->cpuid_cache_L2_associativity = assoc;
 		info_p->cpuid_cache_size       = bitfield32(reg[ecx],31,16);
 		cpuid_fn(0x80000008, reg);
@@ -554,10 +885,9 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 	 * and bracket this with the approved procedure for reading the
 	 * the microcode version number a.k.a. signature a.k.a. BIOS ID
 	 */
-	wrmsr64(MSR_IA32_BIOS_SIGN_ID, 0);
+	//wrmsr64(MSR_IA32_BIOS_SIGN_ID, 0);
 	cpuid_fn(1, reg);
-	info_p->cpuid_microcode_version =
-		(uint32_t) (rdmsr64(MSR_IA32_BIOS_SIGN_ID) >> 32);
+	info_p->cpuid_microcode_version = 21;
 	info_p->cpuid_signature = reg[eax];
 	info_p->cpuid_stepping  = bitfield32(reg[eax],  3,  0);
 	info_p->cpuid_model     = bitfield32(reg[eax],  7,  4);
@@ -569,25 +899,32 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 	info_p->cpuid_features  = quad(reg[ecx], reg[edx]);
 
 	/* Get "processor flag"; necessary for microcode update matching */
-	info_p->cpuid_processor_flag = (rdmsr64(MSR_IA32_PLATFORM_ID)>> 50) & 0x7;
+	info_p->cpuid_processor_flag = 1;
 
-	/* Fold extensions into family/model */
-	if (info_p->cpuid_family == 0x0f)
-		info_p->cpuid_family += info_p->cpuid_extfamily;
-	if (info_p->cpuid_family == 0x0f || info_p->cpuid_family == 0x06)
-		info_p->cpuid_model += (info_p->cpuid_extmodel << 4);
-
-	if (info_p->cpuid_features & CPUID_FEATURE_HTT)
-		info_p->cpuid_logical_per_package =
-				bitfield32(reg[ebx], 23, 16);
-	else
-		info_p->cpuid_logical_per_package = 1;
-
-	if (info_p->cpuid_max_ext >= 0x80000001) {
-		cpuid_fn(0x80000001, reg);
-		info_p->cpuid_extfeatures =
-				quad(reg[ecx], reg[edx]);
-	}
+    /* Fold extensions into family/model */
+    if (info_p->cpuid_family == 0x0f)
+        info_p->cpuid_family += info_p->cpuid_extfamily;
+    if (info_p->cpuid_family == 0x0f || info_p->cpuid_family == 0x06)
+        info_p->cpuid_model += (info_p->cpuid_extmodel << 4);
+    
+    if (info_p->cpuid_features & CPUID_FEATURE_HTT)
+        info_p->cpuid_logical_per_package =
+        bitfield32(reg[ebx], 23, 16);
+    else
+        info_p->cpuid_logical_per_package = 1;
+    
+    if (info_p->cpuid_max_ext >= 0x80000001) {
+        cpuid_fn(0x80000001, reg);
+        if (IsIntelCPU())
+        {
+            info_p->cpuid_extfeatures =
+            quad(reg[ecx], reg[edx]);
+        } else {
+            /* Sinetek: AMD doesn't like the XD bit. */
+            info_p->cpuid_extfeatures =
+            quad(reg[ecx], reg[edx]) & ~CPUID_EXTFEATURE_XD;
+        }
+    }
 
 	DBG(" max_basic           : %d\n", info_p->cpuid_max_basic);
 	DBG(" max_ext             : 0x%08x\n", info_p->cpuid_max_ext);
@@ -667,143 +1004,187 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		DBG("  energy_policy        : %d\n", ctp->energy_policy);
 	}
 
-	if (info_p->cpuid_max_basic >= 0xa) {
-		cpuid_arch_perf_leaf_t	*capp = &info_p->cpuid_arch_perf_leaf;
+    if (info_p->cpuid_max_basic >= 0xa) {
+        cpuid_arch_perf_leaf_t	*capp = &info_p->cpuid_arch_perf_leaf;
+        
+        /*
+         * Architectural Performance Monitoring Leaf:
+         */
+        cpuid_fn(0xa, reg);
+        capp->version	    = bitfield32(reg[eax],  7,  0);
+        capp->number	    = bitfield32(reg[eax], 15,  8);
+        capp->width	    = bitfield32(reg[eax], 23, 16);
+        capp->events_number = bitfield32(reg[eax], 31, 24);
+        capp->events	    = reg[ebx];
+        capp->fixed_number  = bitfield32(reg[edx],  4,  0);
+        capp->fixed_width   = bitfield32(reg[edx], 12,  5);
+        info_p->cpuid_arch_perf_leafp = capp;
+        
+        DBG(" Architectural Performance Monitoring Leaf:\n");
+        DBG("  version       : %d\n", capp->version);
+        DBG("  number        : %d\n", capp->number);
+        DBG("  width         : %d\n", capp->width);
+        DBG("  events_number : %d\n", capp->events_number);
+        DBG("  events        : %d\n", capp->events);
+        DBG("  fixed_number  : %d\n", capp->fixed_number);
+        DBG("  fixed_width   : %d\n", capp->fixed_width);
+    }
+    
+    if (info_p->cpuid_max_basic >= 0xd) {
+        cpuid_xsave_leaf_t	*xsp;
+        /*
+         * XSAVE Features:
+         */
+        xsp = &info_p->cpuid_xsave_leaf[0];
+        info_p->cpuid_xsave_leafp = xsp;
+        xsp->extended_state[eax] = 0xd;
+        xsp->extended_state[ecx] = 0;
+        cpuid(xsp->extended_state);
+        DBG(" XSAVE Main leaf:\n");
+        DBG("  EAX           : 0x%x\n", xsp->extended_state[eax]);
+        DBG("  EBX           : 0x%x\n", xsp->extended_state[ebx]);
+        DBG("  ECX           : 0x%x\n", xsp->extended_state[ecx]);
+        DBG("  EDX           : 0x%x\n", xsp->extended_state[edx]);
+        
+        xsp = &info_p->cpuid_xsave_leaf[1];
+        xsp->extended_state[eax] = 0xd;
+        xsp->extended_state[ecx] = 1;
+        cpuid(xsp->extended_state);
+        DBG(" XSAVE Sub-leaf1:\n");
+        DBG("  EAX           : 0x%x\n", xsp->extended_state[eax]);
+        DBG("  EBX           : 0x%x\n", xsp->extended_state[ebx]);
+        DBG("  ECX           : 0x%x\n", xsp->extended_state[ecx]);
+        DBG("  EDX           : 0x%x\n", xsp->extended_state[edx]);
+        
+    }
 
-		/*
-		 * Architectural Performance Monitoring Leaf:
-		 */
-		cpuid_fn(0xa, reg);
-		capp->version	    = bitfield32(reg[eax],  7,  0);
-		capp->number	    = bitfield32(reg[eax], 15,  8);
-		capp->width	    = bitfield32(reg[eax], 23, 16);
-		capp->events_number = bitfield32(reg[eax], 31, 24);
-		capp->events	    = reg[ebx];
-		capp->fixed_number  = bitfield32(reg[edx],  4,  0);
-		capp->fixed_width   = bitfield32(reg[edx], 12,  5);
-		info_p->cpuid_arch_perf_leafp = capp;
-
-		DBG(" Architectural Performance Monitoring Leaf:\n");
-		DBG("  version       : %d\n", capp->version);
-		DBG("  number        : %d\n", capp->number);
-		DBG("  width         : %d\n", capp->width);
-		DBG("  events_number : %d\n", capp->events_number);
-		DBG("  events        : %d\n", capp->events);
-		DBG("  fixed_number  : %d\n", capp->fixed_number);
-		DBG("  fixed_width   : %d\n", capp->fixed_width);
-	}
-
-	if (info_p->cpuid_max_basic >= 0xd) {
-		cpuid_xsave_leaf_t	*xsp;
-		/*
-		 * XSAVE Features:
-		 */
-		xsp = &info_p->cpuid_xsave_leaf[0];
-		info_p->cpuid_xsave_leafp = xsp;
-		xsp->extended_state[eax] = 0xd;
-		xsp->extended_state[ecx] = 0;
-		cpuid(xsp->extended_state);
-		DBG(" XSAVE Main leaf:\n");
-		DBG("  EAX           : 0x%x\n", xsp->extended_state[eax]);
-		DBG("  EBX           : 0x%x\n", xsp->extended_state[ebx]);
-		DBG("  ECX           : 0x%x\n", xsp->extended_state[ecx]);
-		DBG("  EDX           : 0x%x\n", xsp->extended_state[edx]);
-
-		xsp = &info_p->cpuid_xsave_leaf[1];
-		xsp->extended_state[eax] = 0xd;
-		xsp->extended_state[ecx] = 1;
-		cpuid(xsp->extended_state);
-		DBG(" XSAVE Sub-leaf1:\n");
-		DBG("  EAX           : 0x%x\n", xsp->extended_state[eax]);
-		DBG("  EBX           : 0x%x\n", xsp->extended_state[ebx]);
-		DBG("  ECX           : 0x%x\n", xsp->extended_state[ecx]);
-		DBG("  EDX           : 0x%x\n", xsp->extended_state[edx]);
-
-	}
-
-	if (info_p->cpuid_model >= CPUID_MODEL_IVYBRIDGE) {
-		/*
-		 * Leaf7 Features:
-		 */
-		cpuid_fn(0x7, reg);
-		info_p->cpuid_leaf7_features = quad(reg[ecx], reg[ebx]);
-
-		DBG(" Feature Leaf7:\n");
-		DBG("  EBX           : 0x%x\n", reg[ebx]);
-		DBG("  ECX           : 0x%x\n", reg[ecx]);
-	}
-
-	if (info_p->cpuid_max_basic >= 0x15) {
-		/*
-		 * TCS/CCC frequency leaf:
-		 */
-		cpuid_fn(0x15, reg);
-		info_p->cpuid_tsc_leaf.denominator = reg[eax];
-		info_p->cpuid_tsc_leaf.numerator   = reg[ebx];
-
-		DBG(" TSC/CCC Information Leaf:\n");
-		DBG("  numerator     : 0x%x\n", reg[ebx]);
-		DBG("  denominator   : 0x%x\n", reg[eax]);
-	}
-
-	return;
+    /*
+     if (info_p->cpuid_model >= CPUID_MODEL_IVYBRIDGE) {
+     //Leaf7 Features:
+     
+     cpuid_fn(0x7, reg);
+     info_p->cpuid_leaf7_features = quad(reg[ecx], reg[ebx]);
+     
+     DBG(" Feature Leaf7:\n");
+     DBG("  EBX           : 0x%x\n", reg[ebx]);
+     DBG("  ECX           : 0x%x\n", reg[ecx]);
+     }
+     */
+    if (info_p->cpuid_model >= CPUID_MODEL_IVYBRIDGE)
+    {
+        // Leaf7 Features:
+        if (IsIntelCPU())
+        {
+            cpuid_fn(0x7, reg);
+            info_p->cpuid_leaf7_features = reg[ebx];
+        }
+        DBG(" Feature Leaf7:\n");
+        DBG("  EBX           : 0x%x\n", reg[ebx]);
+    }
+    else
+    {
+        // if (info_p->cpuid_model == 0x1) {
+        //     cpuid_fn(0x7, reg);
+        //     info_p->cpuid_leaf7_features = reg[ebx];
+        
+        //     DBG(" Feature Leaf7:\n");
+        //     DBG("  EBX           : 0x%x\n", reg[ebx]);
+        
+        // } else
+        info_p->cpuid_leaf7_features = 0;
+    }
 }
 
 static uint32_t
 cpuid_set_cpufamily(i386_cpu_info_t *info_p)
 {
-	uint32_t cpufamily = CPUFAMILY_UNKNOWN;
-
-	switch (info_p->cpuid_family) {
-	case 6:
-		switch (info_p->cpuid_model) {
-		case 15:
-			cpufamily = CPUFAMILY_INTEL_MEROM;
-			break;
-		case 23:
-			cpufamily = CPUFAMILY_INTEL_PENRYN;
-			break;
-		case CPUID_MODEL_NEHALEM:
-		case CPUID_MODEL_FIELDS:
-		case CPUID_MODEL_DALES:
-		case CPUID_MODEL_NEHALEM_EX:
-			cpufamily = CPUFAMILY_INTEL_NEHALEM;
-			break;
-		case CPUID_MODEL_DALES_32NM:
-		case CPUID_MODEL_WESTMERE:
-		case CPUID_MODEL_WESTMERE_EX:
-			cpufamily = CPUFAMILY_INTEL_WESTMERE;
-			break;
-		case CPUID_MODEL_SANDYBRIDGE:
-		case CPUID_MODEL_JAKETOWN:
-			cpufamily = CPUFAMILY_INTEL_SANDYBRIDGE;
-			break;
-		case CPUID_MODEL_IVYBRIDGE:
-		case CPUID_MODEL_IVYBRIDGE_EP:
-			cpufamily = CPUFAMILY_INTEL_IVYBRIDGE;
-			break;
-		case CPUID_MODEL_HASWELL:
-		case CPUID_MODEL_HASWELL_EP:
-		case CPUID_MODEL_HASWELL_ULT:
-		case CPUID_MODEL_CRYSTALWELL:
-			cpufamily = CPUFAMILY_INTEL_HASWELL;
-			break;
-		case CPUID_MODEL_BROADWELL:
-		case CPUID_MODEL_BRYSTALWELL:
-			cpufamily = CPUFAMILY_INTEL_BROADWELL;
-			break;
-		case CPUID_MODEL_SKYLAKE:
-		case CPUID_MODEL_SKYLAKE_DT:
-			cpufamily = CPUFAMILY_INTEL_SKYLAKE;
-			break;
-		}
-		break;
-	}
-
-	info_p->cpuid_cpufamily = cpufamily;
-	DBG("cpuid_set_cpufamily(%p) returning 0x%x\n", info_p, cpufamily);
-	return cpufamily;
+    uint32_t cpufamily = CPUFAMILY_INTEL_MEROM;
+    
+    if (IsIntelCPU())
+    {
+        switch (info_p->cpuid_family) {
+            case 6:
+                switch (info_p->cpuid_model) {
+                    case 15:
+                        cpufamily = CPUFAMILY_INTEL_MEROM;
+                        break;
+                    case 23:
+                        cpufamily = CPUFAMILY_INTEL_PENRYN;
+                        break;
+                    case CPUID_MODEL_NEHALEM:
+                    case CPUID_MODEL_FIELDS:
+                    case CPUID_MODEL_DALES:
+                    case CPUID_MODEL_NEHALEM_EX:
+                        cpufamily = CPUFAMILY_INTEL_NEHALEM;
+                        break;
+                    case CPUID_MODEL_DALES_32NM:
+                    case CPUID_MODEL_WESTMERE:
+                    case CPUID_MODEL_WESTMERE_EX:
+                        cpufamily = CPUFAMILY_INTEL_WESTMERE;
+                        break;
+                    case CPUID_MODEL_SANDYBRIDGE:
+                    case CPUID_MODEL_JAKETOWN:
+                        cpufamily = CPUFAMILY_INTEL_SANDYBRIDGE;
+                        break;
+                    case CPUID_MODEL_IVYBRIDGE:
+                    case CPUID_MODEL_IVYBRIDGE_EP:
+                        cpufamily = CPUFAMILY_INTEL_IVYBRIDGE;
+                        break;
+                    case CPUID_MODEL_HASWELL:
+                    case CPUID_MODEL_HASWELL_EP:
+                    case CPUID_MODEL_HASWELL_ULT:
+                    case CPUID_MODEL_CRYSTALWELL:
+                        cpufamily = CPUFAMILY_INTEL_HASWELL;
+                        break;
+                    case CPUID_MODEL_BROADWELL:
+                    case CPUID_MODEL_BRYSTALWELL:
+                        cpufamily = CPUFAMILY_INTEL_BROADWELL;
+                        break;
+                }
+                break;
+                
+            case 15:
+                switch (info_p->cpuid_model) {
+                    case 2:
+                        cpufamily = CPU_FAMILY_PENTIUM_4_M2;
+                        break;
+                    case 4:
+                        cpufamily = CPU_FAMILY_PENTIUM_4;
+                        break;
+                }
+                break;
+        }
+    } else {
+        cpufamily = CPUFAMILY_INTEL_PENRYN;
+    }
+    
+    info_p->cpuid_cpufamily = cpufamily;
+    DBG("cpuid_set_cpufamily(%p) returning 0x%x\n", info_p, cpufamily);
+    return cpufamily;
 }
+
+/* AnV: AMD TLB Fix */
+void
+FixAMDTLB(void)
+{
+    uint64_t value = 0;
+    
+    // re-enable TLB caching if BIOS disabled it
+    // MSR_K8_HWCR mod
+    value = rdmsr64(0xC0010015);
+    value &= ~(1UL << 3);
+    wrmsr64(0xC0010015, value);
+    
+    // MSR_C0011023 mod
+    value = rdmsr64(0xC0011023);
+    value &= ~(1UL << 1);
+    wrmsr64(0xC0011023, value);
+}
+
+/* AnV - Brand string data taken from SMBIOS of MacPro3,1 and iMac10,1 */
+#define CPUID_BRAND_XEON "Intel(R) Xeon(R) CPU           E"
+#define CPUID_BRAND_CORE2 "Intel(R) Core(TM)2 Duo CPU     E7600  @ 3.06GHz"
+
 /*
  * Must be invoked either when executing single threaded, or with
  * independent synchronization.
@@ -812,38 +1193,58 @@ void
 cpuid_set_info(void)
 {
 	i386_cpu_info_t		*info_p = &cpuid_cpu_info;
-	boolean_t		enable_x86_64h = TRUE;
+	boolean_t		enable_x86_64h = FALSE;
+    uint32_t dummyVar;
 
 	cpuid_set_generic_info(info_p);
-
-	/* verify we are running on a supported CPU */
-	if ((strncmp(CPUID_VID_INTEL, info_p->cpuid_vendor,
-		     min(strlen(CPUID_STRING_UNKNOWN) + 1,
-			 sizeof(info_p->cpuid_vendor)))) ||
-	   (cpuid_set_cpufamily(info_p) == CPUFAMILY_UNKNOWN))
-		panic("Unsupported CPU");
+	cpuid_set_cpufamily(info_p);
 
 	info_p->cpuid_cpu_type = CPU_TYPE_X86;
+	info_p->cpuid_cpu_subtype = CPU_SUBTYPE_X86_ARCH1;
 
-	if (!PE_parse_boot_argn("-enable_x86_64h", &enable_x86_64h, sizeof(enable_x86_64h))) {
-		boolean_t		disable_x86_64h = FALSE;
-
-		if (PE_parse_boot_argn("-disable_x86_64h", &disable_x86_64h, sizeof(disable_x86_64h))) {
-			enable_x86_64h = FALSE;
-		}
-	}
-
-	if (enable_x86_64h &&
-	    ((info_p->cpuid_features & CPUID_X86_64_H_FEATURE_SUBSET) == CPUID_X86_64_H_FEATURE_SUBSET) &&
-	    ((info_p->cpuid_extfeatures & CPUID_X86_64_H_EXTFEATURE_SUBSET) == CPUID_X86_64_H_EXTFEATURE_SUBSET) &&
-	    ((info_p->cpuid_leaf7_features & CPUID_X86_64_H_LEAF7_FEATURE_SUBSET) == CPUID_X86_64_H_LEAF7_FEATURE_SUBSET)) {
-		info_p->cpuid_cpu_subtype = CPU_SUBTYPE_X86_64_H;
-	} else {
-		info_p->cpuid_cpu_subtype = CPU_SUBTYPE_X86_ARCH1;
-	}
-
-	/* Must be invoked after set_generic_info */
-	cpuid_set_cache_info(info_p);
+    /* Must be invoked after set_generic_info */
+    if (IsIntelCPU())
+        cpuid_set_cache_info(info_p);
+    else {
+        if (PE_parse_boot_argn("-amdtlbfix", &dummyVar, sizeof(dummyVar)))
+        {
+            FixAMDTLB();
+        }
+        
+        get_amd_cache_info(&cpuid_cpu_info);
+        
+        if (PE_parse_boot_argn("-emulateintel", &dummyVar, sizeof(dummyVar)))
+        {
+            if (info_p->cpuid_cores_per_package >= 3)
+            {
+                /* Xeon for 3 cores or more... */
+                info_p->cpuid_signature = 0x00010676; /* Xeon Signature */
+                
+                /* Set Xeon brand string */
+                strlcpy(info_p->cpuid_brand_string, CPUID_BRAND_XEON, sizeof(CPUID_BRAND_XEON));
+            } else {
+                /* Core 2 Duo for 2 cores or less... */
+                info_p->cpuid_signature = 0x0001067A; /* Core 2 Duo Signature */
+                
+                /* Set Core 2 Duo brand string */
+                strlcpy(info_p->cpuid_brand_string, CPUID_BRAND_CORE2, sizeof(CPUID_BRAND_CORE2));
+            }
+            
+            info_p->cpuid_stepping  = bitfield32(info_p->cpuid_signature,  3,  0);
+            /*info_p->cpuid_model     = bitfield32(info_p->cpuid_signature,  7,  4);
+             info_p->cpuid_family    = bitfield32(info_p->cpuid_signature, 11,  8);*/
+            info_p->cpuid_type      = bitfield32(info_p->cpuid_signature, 13, 12);
+            info_p->cpuid_extmodel  = bitfield32(info_p->cpuid_signature, 19, 16);
+            info_p->cpuid_extfamily = bitfield32(info_p->cpuid_signature, 27, 20);
+            info_p->cpuid_brand     = 0;
+            
+            /* Correct family and model due to Intel norms... */
+            /*if (info_p->cpuid_family == 0x0f)
+             info_p->cpuid_family += info_p->cpuid_extfamily;
+             if (info_p->cpuid_family == 0x0f || info_p->cpuid_family == 0x06)
+             info_p->cpuid_model += (info_p->cpuid_extmodel << 4);*/
+        }
+    }
 
 	/*
 	 * Find the number of enabled cores and threads
@@ -1021,13 +1422,46 @@ cpuid_info(void)
 char *
 cpuid_get_feature_names(uint64_t features, char *buf, unsigned buf_len)
 {
-	return cpuid_get_names(feature_map, features, buf, buf_len); 
+    size_t	len = 0;
+	char	*p = buf;
+	int	i;
+
+	for (i = 0; feature_map[i].mask != 0; i++) {
+		if ((features & feature_map[i].mask) == 0)
+			continue;
+		if (len && ((size_t)(p - buf) < (buf_len - 1)))
+			*p++ = ' ';
+
+		len = min(strlen(feature_map[i].name), (size_t) ((buf_len-1) - (p-buf)));
+		if (len == 0)
+			break;
+		bcopy(feature_map[i].name, p, len);
+		p += len;
+	}
+	*p = '\0';
+	return buf;
 }
 
 char *
 cpuid_get_extfeature_names(uint64_t extfeatures, char *buf, unsigned buf_len)
 {
-	return cpuid_get_names(extfeature_map, extfeatures, buf, buf_len); 
+    size_t	len = 0;
+	char	*p = buf;
+	int	i;
+
+	for (i = 0; extfeature_map[i].mask != 0; i++) {
+		if ((extfeatures & extfeature_map[i].mask) == 0)
+			continue;
+		if (len && ((size_t) (p - buf) < (buf_len - 1)))
+			*p++ = ' ';
+		len = min(strlen(extfeature_map[i].name), (size_t) ((buf_len-1)-(p-buf)));
+		if (len == 0)
+			break;
+		bcopy(extfeature_map[i].name, p, len);
+		p += len;
+	}
+	*p = '\0';
+	return buf;
 }
 
 char *
@@ -1082,25 +1516,30 @@ cpuid_cpu_display(
 unsigned int
 cpuid_family(void)
 {
-	return cpuid_info()->cpuid_family;
+    return cpuid_info()->cpuid_family;
 }
 
 uint32_t
 cpuid_cpufamily(void)
 {
-	return cpuid_info()->cpuid_cpufamily;
+    if (IsAmdCPU())
+    {
+        return CPUFAMILY_INTEL_PENRYN;
+    }
+    
+    return cpuid_info()->cpuid_cpufamily;
 }
 
 cpu_type_t
 cpuid_cputype(void)
 {
-	return cpuid_info()->cpuid_cpu_type;
+    return cpuid_info()->cpuid_cpu_type;
 }
 
 cpu_subtype_t
 cpuid_cpusubtype(void)
 {
-	return cpuid_info()->cpuid_cpu_subtype;
+    return cpuid_info()->cpuid_cpu_subtype;
 }
 
 uint64_t
@@ -1145,67 +1584,68 @@ static i386_vmm_info_t	_cpuid_vmm_info;
 static void
 cpuid_init_vmm_info(i386_vmm_info_t *info_p)
 {
-	uint32_t	reg[4];
-	uint32_t	max_vmm_leaf;
-
-	bzero(info_p, sizeof(*info_p));
-
-	if (!cpuid_vmm_present())
-		return;
-
-	DBG("cpuid_init_vmm_info(%p)\n", info_p);
-
-	/* do cpuid 0x40000000 to get VMM vendor */
-	cpuid_fn(0x40000000, reg);
-	max_vmm_leaf = reg[eax];
-	bcopy((char *)&reg[ebx], &info_p->cpuid_vmm_vendor[0], 4);
-	bcopy((char *)&reg[ecx], &info_p->cpuid_vmm_vendor[4], 4);
-	bcopy((char *)&reg[edx], &info_p->cpuid_vmm_vendor[8], 4);
-	info_p->cpuid_vmm_vendor[12] = '\0';
-
-	if (0 == strcmp(info_p->cpuid_vmm_vendor, CPUID_VMM_ID_VMWARE)) {
-		/* VMware identification string: kb.vmware.com/kb/1009458 */
-		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_VMWARE;
-	} else if (0 == strcmp(info_p->cpuid_vmm_vendor, CPUID_VMM_ID_PARALLELS)) {
-		/* Parallels identification string */
-		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_PARALLELS;
-	} else {
-		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_UNKNOWN;
-	}
-
-	/* VMM generic leaves: https://lkml.org/lkml/2008/10/1/246 */
-	if (max_vmm_leaf >= 0x40000010) {
-		cpuid_fn(0x40000010, reg);
-		
-		info_p->cpuid_vmm_tsc_frequency = reg[eax];
-		info_p->cpuid_vmm_bus_frequency = reg[ebx];
-	}
-
-	DBG(" vmm_vendor          : %s\n", info_p->cpuid_vmm_vendor);
-	DBG(" vmm_family          : %u\n", info_p->cpuid_vmm_family);
-	DBG(" vmm_bus_frequency   : %u\n", info_p->cpuid_vmm_bus_frequency);
-	DBG(" vmm_tsc_frequency   : %u\n", info_p->cpuid_vmm_tsc_frequency);
+    uint32_t	reg[4];
+    uint32_t	max_vmm_leaf;
+    
+    bzero(info_p, sizeof(*info_p));
+    
+    if (!cpuid_vmm_present())
+        return;
+    
+    DBG("cpuid_init_vmm_info(%p)\n", info_p);
+    
+    /* do cpuid 0x40000000 to get VMM vendor */
+    cpuid_fn(0x40000000, reg);
+    max_vmm_leaf = reg[eax];
+    bcopy((char *)&reg[ebx], &info_p->cpuid_vmm_vendor[0], 4);
+    bcopy((char *)&reg[ecx], &info_p->cpuid_vmm_vendor[4], 4);
+    bcopy((char *)&reg[edx], &info_p->cpuid_vmm_vendor[8], 4);
+    info_p->cpuid_vmm_vendor[12] = '\0';
+    
+    if (0 == strcmp(info_p->cpuid_vmm_vendor, CPUID_VMM_ID_VMWARE)) {
+        /* VMware identification string: kb.vmware.com/kb/1009458 */
+        info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_VMWARE;
+    } else if (0 == strcmp(info_p->cpuid_vmm_vendor, CPUID_VMM_ID_PARALLELS)) {
+        /* Parallels identification string */
+        info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_PARALLELS;
+    } else {
+        info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_UNKNOWN;
+    }
+    
+    /* VMM generic leaves: https://lkml.org/lkml/2008/10/1/246 */
+    if (max_vmm_leaf >= 0x40000010) {
+        cpuid_fn(0x40000010, reg);
+        
+        info_p->cpuid_vmm_tsc_frequency = reg[eax];
+        info_p->cpuid_vmm_bus_frequency = reg[ebx];
+    }
+    
+    DBG(" vmm_vendor          : %s\n", info_p->cpuid_vmm_vendor);
+    DBG(" vmm_family          : %u\n", info_p->cpuid_vmm_family);
+    DBG(" vmm_bus_frequency   : %u\n", info_p->cpuid_vmm_bus_frequency);
+    DBG(" vmm_tsc_frequency   : %u\n", info_p->cpuid_vmm_tsc_frequency);
 }
 
 boolean_t
 cpuid_vmm_present(void)
 {
-	return (cpuid_features() & CPUID_FEATURE_VMM) ? TRUE : FALSE;
+    return (cpuid_features() & CPUID_FEATURE_VMM) ? TRUE : FALSE;
 }
 
 i386_vmm_info_t *
 cpuid_vmm_info(void)
 {
-	if (_cpuid_vmm_infop == NULL) {
-		cpuid_init_vmm_info(&_cpuid_vmm_info);
-		_cpuid_vmm_infop = &_cpuid_vmm_info;
-	}
-	return _cpuid_vmm_infop;
+    if (_cpuid_vmm_infop == NULL) {
+        cpuid_init_vmm_info(&_cpuid_vmm_info);
+        _cpuid_vmm_infop = &_cpuid_vmm_info;
+    }
+    return _cpuid_vmm_infop;
 }
 
 uint32_t
 cpuid_vmm_family(void)
 {
-	return cpuid_vmm_info()->cpuid_vmm_family;
+    return cpuid_vmm_info()->cpuid_vmm_family;
 }
+
 

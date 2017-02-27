@@ -761,10 +761,16 @@ boolean_t PEGetMachineName( char * name, int maxLength )
 
 boolean_t PEGetModelName( char * name, int maxLength )
 {
-    if( gIOPlatform)
-	return( gIOPlatform->getModelName( name, maxLength ));
-    else
-	return( false );
+    OSData *prop;
+
+    /* Eureka: Get the model name directly from property instead of calling getModelName(). */
+    prop = (OSData *) IOService::getPlatform()->getProvider()->getProperty(gIODTModelKey);
+    if (prop) {
+      strlcpy(name, (const char *) prop->getBytesNoCopy(), maxLength - 1);
+        return true;
+    }
+    
+    return false;
 }
 
 int PEGetPlatformEpoch(void)
@@ -822,7 +828,8 @@ int PEHaltRestart(unsigned int type)
    }
    else if(type == kPEPanicRestartCPU || type == kPEPanicSync)
    {
-    IOCPURunPlatformPanicActions(type);
+   	IOCPURunPlatformPanicActions(type);
+	PE_sync_panic_buffers();
    }
 
   if (gIOPlatform) return gIOPlatform->haltRestart(type);
@@ -1542,6 +1549,7 @@ IOReturn IOPlatformExpertDevice::newUserClient( task_t owningTask, void * securi
         {
             newConnect->detach( this );
             newConnect->release();
+            err = kIOReturnNotPermitted;
         }
         else
             theConnect = newConnect;

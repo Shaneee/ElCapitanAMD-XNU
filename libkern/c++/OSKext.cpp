@@ -4090,9 +4090,11 @@ finish:
  *      NOTE - we cannot use the characters "<=" or "<" because we have code 
  *      that serializes plists and treats '<' as a special character.
  *********************************************************************/
-bool 
+/* AnV - Don't use blacklist exclude list */
+bool
 OSKext::isInExcludeList(void)
 {
+    return(false);
     OSString *      versionString           = NULL;  // do not release
     char *          versionCString          = NULL;  // do not free
     size_t          i;
@@ -4112,11 +4114,12 @@ OSKext::isInExcludeList(void)
     }
     
     /* parse version strings */
-    versionCString = (char *) versionString->getCStringNoCopy();
+   versionCString = (char *) versionString->getCStringNoCopy();
     
     /* look for "LT" or "LE" form of version string, must be in first two
      * positions.
      */
+    
     if (*versionCString == 'L' && *(versionCString + 1) == 'T') {
         wantLessThan = true;
         versionCString +=2; 

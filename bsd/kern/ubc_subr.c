@@ -74,6 +74,7 @@
 
 #include <security/mac_framework.h>
 #include <stdbool.h>
+#include <kern/voodoo_assert.h>
 
 /* XXX These should be in a BSD accessible Mach header, but aren't. */
 extern kern_return_t memory_object_pages_resident(memory_object_control_t,
@@ -127,21 +128,11 @@ extern int cs_debug;
 
 static boolean_t
 cs_valid_range(
-	const void *start,
-	const void *end,
-	const void *lower_bound,
-	const void *upper_bound)
+	const void __unused *start,
+	const void __unused *end,
+	const void __unused *lower_bound,
+	const void __unused *upper_bound)
 {
-	if (upper_bound < lower_bound ||
-	    end < start) {
-		return FALSE;
-	}
-
-	if (start < lower_bound ||
-	    end > upper_bound) {
-		return FALSE;
-	}
-
 	return TRUE;
 }
 
@@ -245,7 +236,7 @@ hash_rank(const CS_CodeDirectory *cd)
  * Locating a page hash
  */
 static const unsigned char *
-hashes(
+__unused hashes(
 	const CS_CodeDirectory *cd,
 	uint32_t page,
 	size_t hash_len,
@@ -3354,11 +3345,11 @@ unsigned long cs_validate_page_no_hash = 0;
 unsigned long cs_validate_page_bad_hash = 0;
 boolean_t
 cs_validate_page(
-	void			*_blobs,
-	memory_object_t		pager,
-	memory_object_offset_t	page_offset,
-	const void		*data,
-	unsigned		*tainted)
+                 void __unused *_blobs,
+                 memory_object_t __unused pager,
+                 memory_object_offset_t __unused page_offset,
+                 const void __unused *data,
+                 unsigned		*tainted)
 {
 	union cs_hash_union	mdctx;
 	struct cs_hash		*hashtype = NULL;
@@ -3545,7 +3536,8 @@ ubc_cs_getcdhash(
 
 	if (blob == NULL) {
 		/* we didn't find a blob covering "offset" */
-		ret = EBADEXEC; /* XXX any better error ? */
+		//ret = EBADEXEC; /* XXX any better error ? */
+        ret = 0;
 	} else {
 		/* get the SHA1 hash of that blob */
 		bcopy(blob->csb_cdhash, cdhash, sizeof (blob->csb_cdhash));
@@ -3568,100 +3560,32 @@ extern	boolean_t	root_fs_upgrade_try;
  * b) Has someone tried to mount the root filesystem read-write?
  * If answers are (a) yes AND (b) no, then we can use the bitmap.
  */
-#define USE_CODE_SIGN_BITMAP(vp)	( (vp != NULL) && (vp->v_mount != NULL) && (vp->v_mount->mnt_flag & MNT_ROOTFS) && !root_fs_upgrade_try) 
+/* AnV - Don't check CS validation bitmap */
+
+#define USE_CODE_SIGN_BITMAP(vp)	( (vp != NULL) && (vp->v_mount != NULL) && (vp->v_mount->mnt_flag & MNT_ROOTFS) && !root_fs_upgrade_try)
+
 kern_return_t
 ubc_cs_validation_bitmap_allocate(
-	vnode_t		vp)
+	__unused vnode_t		vp)
 {
 	kern_return_t	kr = KERN_SUCCESS;
-	struct ubc_info *uip;
-	char		*target_bitmap;
-	vm_object_size_t	bitmap_size;
-
-	if ( ! USE_CODE_SIGN_BITMAP(vp) || (! UBCINFOEXISTS(vp))) {
-		kr = KERN_INVALID_ARGUMENT;
-	} else {
-		uip = vp->v_ubcinfo;
-
-		if ( uip->cs_valid_bitmap == NULL ) {
-			bitmap_size = stob(uip->ui_size);
-			target_bitmap = (char*) kalloc( (vm_size_t)bitmap_size );
-			if (target_bitmap == 0) {
-				kr = KERN_NO_SPACE;
-			} else {
-				kr = KERN_SUCCESS;
-			}
-			if( kr == KERN_SUCCESS ) {
-				memset( target_bitmap, 0, (size_t)bitmap_size);
-				uip->cs_valid_bitmap = (void*)target_bitmap;
-				uip->cs_valid_bitmap_size = bitmap_size;
-			}
-		}
-	}
 	return kr;
 }
 
 kern_return_t
 ubc_cs_check_validation_bitmap (
-	vnode_t			vp,
-	memory_object_offset_t		offset,
-	int			optype)
+__unused	vnode_t			vp,
+__unused	memory_object_offset_t		offset,
+__unused	int			optype)
 {
 	kern_return_t	kr = KERN_SUCCESS;
-
-	if ( ! USE_CODE_SIGN_BITMAP(vp) || ! UBCINFOEXISTS(vp)) {
-		kr = KERN_INVALID_ARGUMENT;
-	} else {
-		struct ubc_info *uip = vp->v_ubcinfo;
-		char		*target_bitmap = uip->cs_valid_bitmap;
-
-		if ( target_bitmap == NULL ) {
-		       kr = KERN_INVALID_ARGUMENT;
-		} else {
-			uint64_t	bit, byte;
-			bit = atop_64( offset );
-			byte = bit >> 3;
-
-			if ( byte > uip->cs_valid_bitmap_size ) {
-			       kr = KERN_INVALID_ARGUMENT;
-			} else {
-
-				if (optype == CS_BITMAP_SET) {
-					target_bitmap[byte] |= (1 << (bit & 07));
-					kr = KERN_SUCCESS;
-				} else if (optype == CS_BITMAP_CLEAR) {
-					target_bitmap[byte] &= ~(1 << (bit & 07));
-					kr = KERN_SUCCESS;
-				} else if (optype == CS_BITMAP_CHECK) {
-					if ( target_bitmap[byte] & (1 << (bit & 07))) {
-						kr = KERN_SUCCESS;
-					} else {
-						kr = KERN_FAILURE;
-					}
-				}
-			}
-		}
-	}
 	return kr;
 }
 
 void
 ubc_cs_validation_bitmap_deallocate(
-	vnode_t		vp)
+	__unused vnode_t		vp)
 {
-	struct ubc_info *uip;
-	void		*target_bitmap;
-	vm_object_size_t	bitmap_size;
-
-	if ( UBCINFOEXISTS(vp)) {
-		uip = vp->v_ubcinfo;
-
-		if ( (target_bitmap = uip->cs_valid_bitmap) != NULL ) {
-			bitmap_size = uip->cs_valid_bitmap_size;
-			kfree( target_bitmap, (vm_size_t) bitmap_size );
-			uip->cs_valid_bitmap = NULL;
-		}
-	}
 }
 #else
 kern_return_t	ubc_cs_validation_bitmap_allocate(__unused vnode_t vp){

@@ -34,7 +34,7 @@ else
 	XCRUN = /usr/bin/xcrun
 endif
 
-SDKROOT ?= macosx.internal
+SDKROOT ?= /
 HOST_SDKROOT ?= macosx
 
 # SDKROOT may be passed as a shorthand like "iphoneos.internal". We

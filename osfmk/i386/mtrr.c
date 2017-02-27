@@ -65,7 +65,7 @@ decl_simple_lock_data(static, mtrr_lock);
 
 //#define MTRR_DEBUG 1
 #if	MTRR_DEBUG
-#define DBG(x...)	kprintf(x)
+#define DBG(x...)	printf(x)
 #else
 #define DBG(x...)
 #endif
@@ -257,6 +257,24 @@ mtrr_msr_dump(void)
 }
 #endif /* MTRR_DEBUG */
 
+/*** Sinetek: AMD requires configuring a few more things ***/
+/***   doesn't seem to do anything ***/
+void mtrr_amd_init()
+{
+	uint64_t HWCR = rdmsr64(0xC0010015 );
+	printf("AMD_HWCR  %016llX\n", HWCR);
+
+	HWCR |= 1 << 1;
+	HWCR |= 1 << 3;
+	HWCR |= 1 << 4;
+	HWCR |= 1 << 6;
+	HWCR |= 1 << 8;
+	HWCR |= 1 << 17;
+	HWCR |= 1 << 18;
+
+	wrmsr64(0xC0010015, HWCR);
+}
+
 /*
  * Called by the boot processor (BP) early during boot to initialize MTRR
  * support.  The MTRR state on the BP is saved, any additional processors
@@ -272,6 +290,8 @@ mtrr_init(void)
 	/* check for presence of MTRR feature on the processor */
 	if ((cpuid_features() & CPUID_FEATURE_MTRR) == 0)
         	return;  /* no MTRR feature */
+
+	//mtrr_amd_init();
 
 	/* use a lock to serialize MTRR changes */
 	bzero((void *)&mtrr_state, sizeof(mtrr_state));
@@ -337,6 +357,10 @@ mtrr_update_action(void * cache_control_type)
 	/* flush TLBs */
 	flush_tlb_raw();
 
+	//uint32_t amd;
+	//PE_parse_boot_argn("-amd", &amd, sizeof (amd));
+	//if(amd) mtrr_amd_init();
+
 	if (CACHE_CONTROL_PAT == cache_control_type) {
 		/* Change PA6 attribute field to WC */
 		uint64_t pat = rdmsr64(MSR_IA32_CR_PAT);
@@ -362,7 +386,8 @@ mtrr_update_action(void * cache_control_type)
 
 		/* enable all MTRR range registers (what if E was not set?) */
 		wrmsr64(MSR_IA32_MTRR_DEF_TYPE,
-			mtrr_state.MTRRdefType | IA32_MTRR_DEF_TYPE_E);
+			MTRR_TYPE_UNCACHEABLE | IA32_MTRR_DEF_TYPE_E );
+
 	}
 
 	/* flush all caches and TLBs a second time */
@@ -680,7 +705,8 @@ pat_init(void)
 	boolean_t	istate;
 	uint64_t	pat;
 
-	if (!(cpuid_features() & CPUID_FEATURE_PAT))
+	return;
+	if ( !(cpuid_features() & CPUID_FEATURE_PAT))
 		return;
 
 	istate = ml_set_interrupts_enabled(FALSE);
@@ -694,3 +720,62 @@ pat_init(void)
 	}
 	ml_set_interrupts_enabled(istate);
 }
+
+#if DEBUG
+void
+mtrr_lapic_cached(void);
+void
+mtrr_lapic_cached(void)
+{
+	boolean_t	istate;
+	uint32_t	lo;
+	uint32_t	hi;
+	uint64_t	lapic_pbase;
+	uint64_t	base;
+	uint64_t	length;
+	uint32_t	type;
+	unsigned int	i;
+
+	/* Find the local APIC physical base address */
+	rdmsr(MSR_IA32_APIC_BASE, lo, hi);
+	lapic_pbase = (lo &  MSR_IA32_APIC_BASE_BASE);
+
+	DBG("mtrr_lapic_cached() on cpu %d, lapic_pbase: 0x%016llx\n",
+	    get_cpu_number(), lapic_pbase);
+
+	istate = ml_set_interrupts_enabled(FALSE);
+
+	/*
+	 * Search for the variable range MTRR mapping the lapic.
+	 * Flip its type to WC and return.
+	 */
+	for (i = 0; i < mtrr_state.var_count; i++) {
+		if (!(mtrr_state.var_range[i].mask & IA32_MTRR_PHYMASK_VALID))
+			continue;
+		base = mtrr_state.var_range[i].base & IA32_MTRR_PHYSBASE_MASK;
+		type = (uint32_t)(mtrr_state.var_range[i].base & IA32_MTRR_PHYSBASE_TYPE);
+		length = MASK_TO_LEN(mtrr_state.var_range[i].mask);
+		DBG("%d: base: 0x%016llx size: 0x%016llx type: %d\n",
+		     i, base, length, type);
+		if (base <= lapic_pbase &&
+		    lapic_pbase <= base + length - PAGE_SIZE) {
+			DBG("mtrr_lapic_cached() matched var: %d\n", i);
+			mtrr_state.var_range[i].base &=~IA32_MTRR_PHYSBASE_TYPE;
+			mtrr_state.var_range[i].base |= MTRR_TYPE_WRITECOMBINE;
+			ml_set_interrupts_enabled(istate);
+		}
+	}
+
+	/*
+	 * In case we didn't find a covering variable range,
+	 * we slam WC into the default memory type.
+	 */
+	mtrr_state.MTRRdefType = MTRR_TYPE_WRITECOMBINE;
+
+	mtrr_update_cpu(); 
+
+	ml_set_interrupts_enabled(istate);
+
+	return;
+}
+#endif /* DEBUG */

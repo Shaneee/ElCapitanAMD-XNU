@@ -3430,7 +3430,7 @@ nfs_mirror_mount_domount(vnode_t dvp, vnode_t vp, vfs_context_t ctx)
 	} while (0)
 #define xb_copy_opaque(E, XBSRC, XBDST) \
 	do { \
-		uint32_t __count, __val; \
+		uint32_t __count=0, __val=0; \
 		xb_copy_32((E), (XBSRC), (XBDST), __count); \
 		if (E) break; \
 		__count = nfsm_rndup(__count); \
