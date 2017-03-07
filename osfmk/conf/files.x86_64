@@ -125,8 +125,7 @@ osfmk/x86_64/kpc_x86.c              optional kpc
 
 osfmk/i386/startup64.c		standard
 osfmk/x86_64/idt64.s		standard
+osfmk/OPEMU/opemu.c		standard
+osfmk/OPEMU/opemu_math.c	standard
 
 osfmk/i386/panic_hooks.c	standard
-
-osfmk/OPEMU/opemu.c		standard
-osfmk/OPEMU/opemu_math.c		standard

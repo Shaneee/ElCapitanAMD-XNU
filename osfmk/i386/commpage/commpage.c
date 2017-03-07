@@ -272,6 +272,18 @@ commpage_init_cpu_capabilities( void )
 	}
 
 	cpus = commpage_cpus();			// how many CPUs do we have
+    
+    if (IsAmdCPU()) {
+        bits |= kHasSSE4_1;
+        bits |= kHasSSE4_2;
+        bits &= ~kHasSupplementalSSE3;
+#define MAVERICKS_AMD
+#ifdef MAVERICKS_AMD
+        bits |= kHasSSE3;
+        //	bits |= kHasSupplementalSSE3;
+        bits &= ~kHasSSE4_2;
+#endif
+    }
 
 	bits |= (cpus << kNumCPUsShift);
 
